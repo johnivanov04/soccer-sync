@@ -10,7 +10,7 @@ const firebaseConfig = {
   messagingSenderId: process.env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
   appId: process.env.EXPO_PUBLIC_FIREBASE_APP_ID,
 };
-
+console.log("🔥 firebaseConfig at startuffp:", firebaseConfig);
 const app = initializeApp(firebaseConfig);
 
 export const auth = getAuth(app);
