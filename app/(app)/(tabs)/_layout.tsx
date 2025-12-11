@@ -4,29 +4,33 @@ import React from "react";
 
 export default function AppTabsLayout() {
   return (
-    <Tabs>
+    <Tabs screenOptions={{ headerTitleAlign: "center" }}>
       <Tabs.Screen
         name="matches"
         options={{
           title: "Matches",
+          tabBarLabel: "Matches",
         }}
       />
       <Tabs.Screen
         name="teams"
         options={{
           title: "Teams",
+          tabBarLabel: "Teams",
         }}
       />
       <Tabs.Screen
         name="stats"
         options={{
-          title: "Stats",
+          title: "Fitness",
+          tabBarLabel: "Fitness",
         }}
       />
       <Tabs.Screen
         name="profile"
         options={{
           title: "Profile",
+          tabBarLabel: "Profile",
         }}
       />
     </Tabs>

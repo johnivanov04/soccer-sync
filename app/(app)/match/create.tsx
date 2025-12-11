@@ -2,18 +2,18 @@
 import DateTimePicker from "@react-native-community/datetimepicker";
 import { useRouter } from "expo-router";
 import {
-    addDoc,
-    collection,
-    serverTimestamp,
+  addDoc,
+  collection,
+  serverTimestamp,
 } from "firebase/firestore";
 import React, { useState } from "react";
 import {
-    Alert,
-    Button,
-    StyleSheet,
-    Text,
-    TextInput,
-    View,
+  Alert,
+  Button,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
 } from "react-native";
 import { db } from "../../../src/firebaseConfig";
 
@@ -29,6 +29,7 @@ export default function CreateMatchScreen() {
   const [locationText, setLocationText] = useState("");
   const [maxPlayers, setMaxPlayers] = useState("14");
   const [description, setDescription] = useState("");
+  
 
   const handleCreate = async () => {
     if (!locationText) {

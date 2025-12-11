@@ -1,14 +1,17 @@
 // app/(app)/match/[matchId].tsx
 import { useLocalSearchParams, useRouter } from "expo-router";
 import {
-    collection,
-    doc,
-    getDoc,
-    onSnapshot,
-    query,
-    setDoc,
-    where,
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  onSnapshot,
+  query,
+  setDoc,
+  updateDoc,
+  where,
 } from "firebase/firestore";
+
 import React, { useEffect, useState } from "react";
 import { Button, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useAuth } from "../../../src/context/AuthContext";
@@ -60,12 +63,34 @@ export default function MatchDetailScreen() {
     return () => unsub();
   }, [matchId, user?.uid]);
 
+  const recomputeYesCount = async () => {
+    try {
+      const rsvpsCol = collection(db, "rsvps");
+      const yesQuery = query(
+        rsvpsCol,
+        where("matchId", "==", String(matchId)),
+        where("status", "==", "yes")
+      );
+
+      const yesSnap = await getDocs(yesQuery);
+      const matchRef = doc(db, "matches", String(matchId));
+
+      await updateDoc(matchRef, {
+        confirmedYesCount: yesSnap.size,
+      });
+    } catch (err) {
+      console.error("Error recomputing YES count", err);
+    }
+  };
+
+
   // 👇 type the status param
   const handleRsvp = async (status: RsvpStatus) => {
     if (!user) return;
     try {
       const rsvpId = `${matchId}_${user.uid}`;
       const rsvpRef = doc(db, "rsvps", rsvpId);
+
       await setDoc(
         rsvpRef,
         {
@@ -76,9 +101,13 @@ export default function MatchDetailScreen() {
         },
         { merge: true }
       );
+
       setUserStatus(status);
+
+      // Recalculate how many YES RSVPs this match has
+      await recomputeYesCount();
     } catch (e) {
-      console.error(e);
+      console.error("RSVP error", e);
     }
   };
 
