@@ -45,7 +45,14 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   const signOut = async () => {
-    await fbSignOut(auth);
+    // OPTIONAL: wrap in try/catch and clear user immediately for snappier UI
+    try {
+      await fbSignOut(auth);
+      // setUser(null); // optional: onAuthStateChanged will also handle this
+    } catch (err) {
+      console.error("Error signing out:", err);
+      throw err; // so the caller can show an error message
+    }
   };
 
   return (
