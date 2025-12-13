@@ -13,12 +13,20 @@ import {
 } from "firebase/firestore";
 
 import React, { useEffect, useState } from "react";
-import { Button, ScrollView, StyleSheet, Text, View } from "react-native";
+import {
+  Alert,
+  Button,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
 
 const RSVP_STATUSES = ["yes", "maybe", "no"] as const;
 type RsvpStatus = (typeof RSVP_STATUSES)[number];
+type MatchStatus = "scheduled" | "played" | "cancelled";
 
 type Rsvp = {
   id: string;
@@ -33,7 +41,7 @@ export default function MatchDetailScreen() {
   const router = useRouter();
 
   const [match, setMatch] = useState<any | null>(null);
-  const [rsvps, setRsvps] = useState<Rsvp[]>([]);   // 👈 typed
+  const [rsvps, setRsvps] = useState<Rsvp[]>([]);
   const [userStatus, setUserStatus] = useState<RsvpStatus | null>(null);
 
   useEffect(() => {
@@ -84,50 +92,80 @@ export default function MatchDetailScreen() {
     }
   };
 
-
-  // 👇 type the status param
   const handleRsvp = async (status: RsvpStatus) => {
-  if (!user) return;
-
-  try {
-    const rsvpId = `${matchId}_${user.uid}`;
-    const rsvpRef = doc(db, "rsvps", rsvpId);
-
-    // Try to pull a friendly name from /users/{uid}
-    let playerName = user.email ?? user.uid;
+    if (!user) return;
 
     try {
-      const userDocRef = doc(db, "users", user.uid);
-      const snap = await getDoc(userDocRef);
-      if (snap.exists()) {
-        const data = snap.data() as any;
-        if (data?.displayName) {
-          playerName = data.displayName;
+      const rsvpId = `${matchId}_${user.uid}`;
+      const rsvpRef = doc(db, "rsvps", rsvpId);
+
+      // Try to pull a friendly name from /users/{uid}
+      let playerName = user.email ?? user.uid;
+
+      try {
+        const userDocRef = doc(db, "users", user.uid);
+        const snap = await getDoc(userDocRef);
+        if (snap.exists()) {
+          const data = snap.data() as any;
+          if (data?.displayName) {
+            playerName = data.displayName;
+          }
         }
+      } catch (innerErr) {
+        console.warn("Could not load user profile for RSVP", innerErr);
       }
-    } catch (innerErr) {
-      console.warn("Could not load user profile for RSVP", innerErr);
+
+      await setDoc(
+        rsvpRef,
+        {
+          matchId: String(matchId),
+          userId: user.uid,
+          playerName,
+          status,
+          updatedAt: new Date(),
+        },
+        { merge: true }
+      );
+
+      setUserStatus(status);
+      await recomputeYesCount();
+    } catch (e) {
+      console.error(e);
     }
+  };
 
-    await setDoc(
-      rsvpRef,
-      {
-        matchId: String(matchId),
-        userId: user.uid,
-        playerName,
-        status,
-        updatedAt: new Date(),
-      },
-      { merge: true }
+  const handleUpdateStatus = async (newStatus: MatchStatus) => {
+    if (!matchId) return;
+    try {
+      const matchRef = doc(db, "matches", String(matchId));
+      await updateDoc(matchRef, {
+        status: newStatus,
+        ...(newStatus === "played" ? { playedAt: new Date() } : {}),
+      });
+
+      setMatch((prev: any) =>
+        prev ? { ...prev, status: newStatus } : prev
+      );
+    } catch (err) {
+      console.error("Error updating match status", err);
+      Alert.alert("Error", "Could not update match status.");
+    }
+  };
+
+  const confirmCancel = () => {
+    Alert.alert(
+      "Cancel match?",
+      "Players will see this match as cancelled.",
+      [
+        { text: "Never mind", style: "cancel" },
+        {
+          text: "Cancel match",
+          style: "destructive",
+          onPress: () => handleUpdateStatus("cancelled"),
+        },
+      ]
     );
-
-    setUserStatus(status);
-    await recomputeYesCount();
-  } catch (e) {
-    console.error(e);
-  }
-};
-
+  };
 
   if (!match) {
     return (
@@ -140,6 +178,15 @@ export default function MatchDetailScreen() {
   const date =
     match.startDateTime?.toDate?.() || new Date(match.startDateTime);
   const going = rsvps.filter((r) => r.status === "yes");
+  const status: MatchStatus = (match.status as MatchStatus) || "scheduled";
+  const isHost = !!user && match.createdBy === user.uid;
+
+  const statusLabel =
+    status === "scheduled"
+      ? "Scheduled"
+      : status === "played"
+      ? "Played"
+      : "Cancelled";
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
@@ -149,18 +196,20 @@ export default function MatchDetailScreen() {
       </Text>
       <Text style={styles.location}>{match.locationText}</Text>
 
+      <Text style={styles.statusLine}>Status: {statusLabel}</Text>
+
       <Text style={{ marginTop: 12 }}>
         {going.length}/{match.maxPlayers} going
       </Text>
 
       <Text style={styles.sectionTitle}>Your RSVP</Text>
       <View style={styles.rsvpRow}>
-        {RSVP_STATUSES.map((status) => (
+        {RSVP_STATUSES.map((statusOption) => (
           <Button
-            key={status}
-            title={status.toUpperCase()}
-            color={userStatus === status ? "#007AFF" : "#aaa"}
-            onPress={() => handleRsvp(status)}
+            key={statusOption}
+            title={statusOption.toUpperCase()}
+            color={userStatus === statusOption ? "#007AFF" : "#aaa"}
+            onPress={() => handleRsvp(statusOption)}
           />
         ))}
       </View>
@@ -170,6 +219,24 @@ export default function MatchDetailScreen() {
       {going.map((r) => (
         <Text key={r.id}>{r.playerName || r.userId}</Text>
       ))}
+
+      {isHost && (
+        <>
+          <Text style={styles.sectionTitle}>Host controls</Text>
+          <View style={styles.hostButtons}>
+            <Button
+              title="Mark as played"
+              onPress={() => handleUpdateStatus("played")}
+            />
+            <View style={{ width: 12 }} />
+            <Button
+              title="Cancel match"
+              color="#d11"
+              onPress={confirmCancel}
+            />
+          </View>
+        </>
+      )}
 
       <View style={{ height: 40 }} />
       <Button title="Back to matches" onPress={() => router.back()} />
@@ -181,10 +248,17 @@ const styles = StyleSheet.create({
   container: { padding: 16 },
   title: { fontSize: 20, fontWeight: "bold" },
   location: { marginTop: 4, color: "#666" },
+  statusLine: { marginTop: 8, color: "#555", fontSize: 13 },
   sectionTitle: { marginTop: 16, fontWeight: "600" },
   rsvpRow: {
     flexDirection: "row",
     justifyContent: "space-around",
     marginTop: 8,
+  },
+  hostButtons: {
+    flexDirection: "row",
+    marginTop: 8,
+    justifyContent: "flex-start",
+    alignItems: "center",
   },
 });

@@ -1,11 +1,7 @@
 // app/(app)/match/create.tsx
 import DateTimePicker from "@react-native-community/datetimepicker";
 import { useRouter } from "expo-router";
-import {
-  addDoc,
-  collection,
-  serverTimestamp,
-} from "firebase/firestore";
+import { addDoc, collection, serverTimestamp } from "firebase/firestore";
 import React, { useState } from "react";
 import {
   Alert,
@@ -15,46 +11,57 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
 
 const DEMO_TEAM_ID = "demo-team";
 
 export default function CreateMatchScreen() {
   const router = useRouter();
+  const { user } = useAuth();
 
   const [date, setDate] = useState(
-    new Date(Date.now() + 2 * 60 * 60 * 1000)
+    new Date(Date.now() + 2 * 60 * 60 * 1000) // default = 2h from now
   );
   const [showPicker, setShowPicker] = useState(false);
   const [locationText, setLocationText] = useState("");
   const [maxPlayers, setMaxPlayers] = useState("14");
   const [description, setDescription] = useState("");
-  
 
   const handleCreate = async () => {
-    if (!locationText) {
-      Alert.alert("Location required");
+    if (!user) {
+      Alert.alert("Please sign in", "You need to be signed in to create a match.");
+      return;
+    }
+
+    if (!locationText.trim()) {
+      Alert.alert("Location required", "Please enter where you’re playing.");
       return;
     }
 
     try {
-      const rsvpDeadline = new Date(
-        date.getTime() - 24 * 60 * 60 * 1000
-      );
+      // Simple v1 logic: RSVP deadline = 24h before kickoff
+      const rsvpDeadline = new Date(date.getTime() - 24 * 60 * 60 * 1000);
 
       const matchesCol = collection(db, "matches");
       const docRef = await addDoc(matchesCol, {
         teamId: DEMO_TEAM_ID,
         startDateTime: date,
-        locationText,
-        maxPlayers: Number(maxPlayers),
+        locationText: locationText.trim(),
+        maxPlayers: Number(maxPlayers) || 14,
         minPlayers: 8,
         rsvpDeadline,
-        description: description || "",
-        status: "published",
+        description: description.trim() || "",
+
+        // ✅ host + status fields
+        createdBy: user.uid,
+        status: "scheduled", // "scheduled" | "played" | "cancelled"
+
+        // counters used in the UI
         confirmedYesCount: 0,
         maybeCount: 0,
         waitlistCount: 0,
+
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
