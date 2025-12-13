@@ -7,26 +7,19 @@ import {
   getDocs,
   onSnapshot,
   query,
+  serverTimestamp,
   setDoc,
   updateDoc,
   where,
 } from "firebase/firestore";
 
 import React, { useEffect, useState } from "react";
-import {
-  Alert,
-  Button,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
+import { Button, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
 
 const RSVP_STATUSES = ["yes", "maybe", "no"] as const;
 type RsvpStatus = (typeof RSVP_STATUSES)[number];
-type MatchStatus = "scheduled" | "played" | "cancelled";
 
 type Rsvp = {
   id: string;
@@ -44,6 +37,7 @@ export default function MatchDetailScreen() {
   const [rsvps, setRsvps] = useState<Rsvp[]>([]);
   const [userStatus, setUserStatus] = useState<RsvpStatus | null>(null);
 
+  // Load match + RSVPs
   useEffect(() => {
     if (!matchId) return;
 
@@ -65,6 +59,7 @@ export default function MatchDetailScreen() {
         ...(d.data() as any),
       }));
       setRsvps(list);
+
       const mine = list.find((r) => r.userId === user?.uid);
       setUserStatus((mine?.status as RsvpStatus | undefined) ?? null);
     });
@@ -72,6 +67,7 @@ export default function MatchDetailScreen() {
     return () => unsub();
   }, [matchId, user?.uid]);
 
+  // Recompute confirmedYesCount on the match doc
   const recomputeYesCount = async () => {
     try {
       const rsvpsCol = collection(db, "rsvps");
@@ -86,12 +82,14 @@ export default function MatchDetailScreen() {
 
       await updateDoc(matchRef, {
         confirmedYesCount: yesSnap.size,
+        updatedAt: serverTimestamp(),
       });
     } catch (err) {
       console.error("Error recomputing YES count", err);
     }
   };
 
+  // Save RSVP + friendly playerName
   const handleRsvp = async (status: RsvpStatus) => {
     if (!user) return;
 
@@ -99,7 +97,6 @@ export default function MatchDetailScreen() {
       const rsvpId = `${matchId}_${user.uid}`;
       const rsvpRef = doc(db, "rsvps", rsvpId);
 
-      // Try to pull a friendly name from /users/{uid}
       let playerName = user.email ?? user.uid;
 
       try {
@@ -134,37 +131,19 @@ export default function MatchDetailScreen() {
     }
   };
 
-  const handleUpdateStatus = async (newStatus: MatchStatus) => {
+  // Host-only: update match status
+  const handleUpdateStatus = async (newStatus: "played" | "cancelled") => {
     if (!matchId) return;
     try {
       const matchRef = doc(db, "matches", String(matchId));
       await updateDoc(matchRef, {
         status: newStatus,
-        ...(newStatus === "played" ? { playedAt: new Date() } : {}),
+        updatedAt: serverTimestamp(),
       });
-
-      setMatch((prev: any) =>
-        prev ? { ...prev, status: newStatus } : prev
-      );
+      setMatch((prev: any) => (prev ? { ...prev, status: newStatus } : prev));
     } catch (err) {
       console.error("Error updating match status", err);
-      Alert.alert("Error", "Could not update match status.");
     }
-  };
-
-  const confirmCancel = () => {
-    Alert.alert(
-      "Cancel match?",
-      "Players will see this match as cancelled.",
-      [
-        { text: "Never mind", style: "cancel" },
-        {
-          text: "Cancel match",
-          style: "destructive",
-          onPress: () => handleUpdateStatus("cancelled"),
-        },
-      ]
-    );
   };
 
   if (!match) {
@@ -177,16 +156,19 @@ export default function MatchDetailScreen() {
 
   const date =
     match.startDateTime?.toDate?.() || new Date(match.startDateTime);
+
   const going = rsvps.filter((r) => r.status === "yes");
-  const status: MatchStatus = (match.status as MatchStatus) || "scheduled";
-  const isHost = !!user && match.createdBy === user.uid;
+
+  const status: string = match.status ?? "scheduled";
+  const isHost = user?.uid && match.createdBy === user.uid;
+  const isScheduled = status === "scheduled";
 
   const statusLabel =
-    status === "scheduled"
-      ? "Scheduled"
+    status === "cancelled"
+      ? "Cancelled"
       : status === "played"
       ? "Played"
-      : "Cancelled";
+      : "Scheduled";
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
@@ -196,23 +178,38 @@ export default function MatchDetailScreen() {
       </Text>
       <Text style={styles.location}>{match.locationText}</Text>
 
-      <Text style={styles.statusLine}>Status: {statusLabel}</Text>
-
-      <Text style={{ marginTop: 12 }}>
-        {going.length}/{match.maxPlayers} going
-      </Text>
+      <View style={styles.statusRow}>
+        <Text
+          style={[
+            styles.statusTag,
+            status === "cancelled" && styles.statusCancelled,
+            status === "played" && styles.statusPlayed,
+          ]}
+        >
+          {statusLabel}
+        </Text>
+        <Text style={styles.goingText}>
+          {going.length}/{match.maxPlayers} going
+        </Text>
+      </View>
 
       <Text style={styles.sectionTitle}>Your RSVP</Text>
-      <View style={styles.rsvpRow}>
-        {RSVP_STATUSES.map((statusOption) => (
-          <Button
-            key={statusOption}
-            title={statusOption.toUpperCase()}
-            color={userStatus === statusOption ? "#007AFF" : "#aaa"}
-            onPress={() => handleRsvp(statusOption)}
-          />
-        ))}
-      </View>
+      {isScheduled ? (
+        <View style={styles.rsvpRow}>
+          {RSVP_STATUSES.map((statusOption) => (
+            <Button
+              key={statusOption}
+              title={statusOption.toUpperCase()}
+              color={userStatus === statusOption ? "#007AFF" : "#aaa"}
+              onPress={() => handleRsvp(statusOption)}
+            />
+          ))}
+        </View>
+      ) : (
+        <Text style={{ marginTop: 8 }}>
+          RSVPs are closed for this match ({statusLabel.toLowerCase()}).
+        </Text>
+      )}
 
       <Text style={styles.sectionTitle}>Going</Text>
       {going.length === 0 && <Text>No confirmed players yet.</Text>}
@@ -222,19 +219,26 @@ export default function MatchDetailScreen() {
 
       {isHost && (
         <>
-          <Text style={styles.sectionTitle}>Host controls</Text>
-          <View style={styles.hostButtons}>
-            <Button
-              title="Mark as played"
-              onPress={() => handleUpdateStatus("played")}
-            />
-            <View style={{ width: 12 }} />
-            <Button
-              title="Cancel match"
-              color="#d11"
-              onPress={confirmCancel}
-            />
-          </View>
+          <Text style={styles.sectionTitle}>Host tools</Text>
+
+          {status !== "played" && (
+            <View style={{ marginVertical: 4 }}>
+              <Button
+                title="Mark as played"
+                onPress={() => handleUpdateStatus("played")}
+              />
+            </View>
+          )}
+
+          {status !== "cancelled" && (
+            <View style={{ marginVertical: 4 }}>
+              <Button
+                title="Cancel match"
+                color="#d11"
+                onPress={() => handleUpdateStatus("cancelled")}
+              />
+            </View>
+          )}
         </>
       )}
 
@@ -248,17 +252,36 @@ const styles = StyleSheet.create({
   container: { padding: 16 },
   title: { fontSize: 20, fontWeight: "bold" },
   location: { marginTop: 4, color: "#666" },
-  statusLine: { marginTop: 8, color: "#555", fontSize: 13 },
   sectionTitle: { marginTop: 16, fontWeight: "600" },
   rsvpRow: {
     flexDirection: "row",
     justifyContent: "space-around",
     marginTop: 8,
   },
-  hostButtons: {
+  statusRow: {
     flexDirection: "row",
-    marginTop: 8,
-    justifyContent: "flex-start",
+    justifyContent: "space-between",
     alignItems: "center",
+    marginTop: 12,
+  },
+  statusTag: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: "#E5F0FF",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  statusCancelled: {
+    backgroundColor: "#FDE8E8",
+    color: "#B00020",
+  },
+  statusPlayed: {
+    backgroundColor: "#E2F7E1",
+    color: "#1B5E20",
+  },
+  goingText: {
+    fontSize: 14,
+    color: "#333",
   },
 });
