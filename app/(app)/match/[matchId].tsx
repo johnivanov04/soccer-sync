@@ -24,6 +24,7 @@ type Rsvp = {
   id: string;
   userId?: string;
   status?: RsvpStatus;
+  playerName?: string;
 };
 
 export default function MatchDetailScreen() {
@@ -86,30 +87,47 @@ export default function MatchDetailScreen() {
 
   // 👇 type the status param
   const handleRsvp = async (status: RsvpStatus) => {
-    if (!user) return;
+  if (!user) return;
+
+  try {
+    const rsvpId = `${matchId}_${user.uid}`;
+    const rsvpRef = doc(db, "rsvps", rsvpId);
+
+    // Try to pull a friendly name from /users/{uid}
+    let playerName = user.email ?? user.uid;
+
     try {
-      const rsvpId = `${matchId}_${user.uid}`;
-      const rsvpRef = doc(db, "rsvps", rsvpId);
-
-      await setDoc(
-        rsvpRef,
-        {
-          matchId: String(matchId),
-          userId: user.uid,
-          status,
-          updatedAt: new Date(),
-        },
-        { merge: true }
-      );
-
-      setUserStatus(status);
-
-      // Recalculate how many YES RSVPs this match has
-      await recomputeYesCount();
-    } catch (e) {
-      console.error("RSVP error", e);
+      const userDocRef = doc(db, "users", user.uid);
+      const snap = await getDoc(userDocRef);
+      if (snap.exists()) {
+        const data = snap.data() as any;
+        if (data?.displayName) {
+          playerName = data.displayName;
+        }
+      }
+    } catch (innerErr) {
+      console.warn("Could not load user profile for RSVP", innerErr);
     }
-  };
+
+    await setDoc(
+      rsvpRef,
+      {
+        matchId: String(matchId),
+        userId: user.uid,
+        playerName,
+        status,
+        updatedAt: new Date(),
+      },
+      { merge: true }
+    );
+
+    setUserStatus(status);
+    await recomputeYesCount();
+  } catch (e) {
+    console.error(e);
+  }
+};
+
 
   if (!match) {
     return (
@@ -150,7 +168,7 @@ export default function MatchDetailScreen() {
       <Text style={styles.sectionTitle}>Going</Text>
       {going.length === 0 && <Text>No confirmed players yet.</Text>}
       {going.map((r) => (
-        <Text key={r.id}>Player {r.userId}</Text>
+        <Text key={r.id}>{r.playerName || r.userId}</Text>
       ))}
 
       <View style={{ height: 40 }} />

@@ -8,6 +8,7 @@ export default function SignUpScreen() {
   const router = useRouter();
   const { signUp } = useAuth();
 
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -15,19 +16,25 @@ export default function SignUpScreen() {
   const handleSignUp = async () => {
     try {
       setError("");
-      await signUp(email.trim(), password);
+      await signUp(email.trim(), password, name.trim());
       router.replace("/(app)/(tabs)/matches");
     } catch (e: any) {
       console.error(e);
-      setError(e?.message || "Could not sign up");
+      setError(e.message || "Could not sign up");
     }
   };
-
 
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Create your account</Text>
       {!!error && <Text style={styles.error}>{error}</Text>}
+
+      <TextInput
+        style={styles.input}
+        placeholder="Name (what teammates see)"
+        value={name}
+        onChangeText={setName}
+      />
 
       <TextInput
         style={styles.input}

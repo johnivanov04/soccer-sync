@@ -6,21 +6,20 @@ import {
   signInWithEmailAndPassword,
   User,
 } from "firebase/auth";
+import { doc, serverTimestamp, setDoc } from "firebase/firestore";
 import React, {
   createContext,
   useContext,
   useEffect,
   useState,
 } from "react";
-
-import { doc, setDoc } from "firebase/firestore";
 import { auth, db } from "../firebaseConfig";
 
 interface AuthContextValue {
   user: User | null;
   initializing: boolean;
   signIn: (email: string, password: string) => Promise<void>;
-  signUp: (email: string, password: string) => Promise<void>;
+  signUp: (email: string, password: string, displayName?: string) => Promise<void>;
   signOut: () => Promise<void>;
 }
 
@@ -42,32 +41,28 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     await signInWithEmailAndPassword(auth, email, password);
   };
 
-  const signUp = async (email: string, password: string) => {
+  const signUp = async (email: string, password: string, displayName?: string) => {
     const cred = await createUserWithEmailAndPassword(auth, email, password);
+    const uid = cred.user.uid;
 
-    // 🔹 Create /users/{uid} doc with a default team
-    try {
-      await setDoc(
-        doc(db, "users", cred.user.uid),
-        {
-          email: cred.user.email ?? email,
-          teamId: "demo-team", // default team for now
-        },
-        { merge: true }
-      );
-    } catch (err) {
-      console.error("Error creating user profile:", err);
-      // we don't throw here so sign-up still succeeds
-    }
+    const friendlyName =
+      displayName?.trim() || email.split("@")[0] || "Player";
+
+    // Create /users/{uid} with a default team + profile info
+    await setDoc(
+      doc(db, "users", uid),
+      {
+        email: cred.user.email,
+        displayName: friendlyName,
+        teamId: "demo-team",
+        createdAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
   };
 
   const signOut = async () => {
-    try {
-      await fbSignOut(auth);
-    } catch (err) {
-      console.error("Error signing out:", err);
-      throw err;
-    }
+    await fbSignOut(auth);
   };
 
   return (
