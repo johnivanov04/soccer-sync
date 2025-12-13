@@ -12,7 +12,9 @@ import React, {
   useEffect,
   useState,
 } from "react";
-import { auth } from "../firebaseConfig";
+
+import { doc, setDoc } from "firebase/firestore";
+import { auth, db } from "../firebaseConfig";
 
 interface AuthContextValue {
   user: User | null;
@@ -41,17 +43,30 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   const signUp = async (email: string, password: string) => {
-    await createUserWithEmailAndPassword(auth, email, password);
+    const cred = await createUserWithEmailAndPassword(auth, email, password);
+
+    // 🔹 Create /users/{uid} doc with a default team
+    try {
+      await setDoc(
+        doc(db, "users", cred.user.uid),
+        {
+          email: cred.user.email ?? email,
+          teamId: "demo-team", // default team for now
+        },
+        { merge: true }
+      );
+    } catch (err) {
+      console.error("Error creating user profile:", err);
+      // we don't throw here so sign-up still succeeds
+    }
   };
 
   const signOut = async () => {
-    // OPTIONAL: wrap in try/catch and clear user immediately for snappier UI
     try {
       await fbSignOut(auth);
-      // setUser(null); // optional: onAuthStateChanged will also handle this
     } catch (err) {
       console.error("Error signing out:", err);
-      throw err; // so the caller can show an error message
+      throw err;
     }
   };
 

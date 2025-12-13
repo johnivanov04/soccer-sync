@@ -1,246 +1,235 @@
 // app/(app)/(tabs)/teams.tsx
-import {
-  collection,
-  doc,
-  onSnapshot,
-  query,
-  setDoc,
-  where,
-} from "firebase/firestore";
+import { doc, getDoc, setDoc } from "firebase/firestore";
 import React, { useEffect, useState } from "react";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import {
+  Alert,
+  Button,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
-
-const DEMO_TEAM_ID = "demo-team";
 
 type Team = {
   id: string;
   name?: string;
-  location?: string;
-  description?: string;
-  joinCode?: string;
+  homeCity?: string;
+  defaultMaxPlayers?: number;
 };
+
+const DEMO_TEAM_ID = "demo-team";
 
 export default function TeamsScreen() {
   const { user } = useAuth();
+  const [teamId, setTeamId] = useState<string | null>(null);
   const [team, setTeam] = useState<Team | null>(null);
-  const [memberCount, setMemberCount] = useState<number | null>(null);
+  const [joinCode, setJoinCode] = useState("");
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
 
+  // 1️⃣ Load user's current teamId
   useEffect(() => {
-    // Listen to the demo team document
-    const teamRef = doc(db, "teams", DEMO_TEAM_ID);
-    const unsubTeam = onSnapshot(
-      teamRef,
-      (snap) => {
+    const load = async () => {
+      if (!user?.uid) {
+        setTeamId(null);
+        setTeam(null);
+        setLoading(false);
+        return;
+      }
+
+      try {
+        const userRef = doc(db, "users", user.uid);
+        const snap = await getDoc(userRef);
+
         if (snap.exists()) {
-          const data = snap.data() as Omit<Team, "id">;
-          setTeam({ id: snap.id, ...data });
+          const data = snap.data() as any;
+          setTeamId(data.teamId || null);
+
+          // also load the team document if we have one
+          if (data.teamId) {
+            const teamRef = doc(db, "teams", data.teamId);
+            const teamSnap = await getDoc(teamRef);
+            if (teamSnap.exists()) {
+              setTeam({ id: teamSnap.id, ...(teamSnap.data() as any) });
+            } else {
+              setTeam(null);
+            }
+          } else {
+            setTeam(null);
+          }
         } else {
+          setTeamId(null);
           setTeam(null);
         }
-        setLoading(false);
-      },
-      (err) => {
-        console.error("Error loading team", err);
+      } catch (err) {
+        console.error("Error loading team info:", err);
+      } finally {
         setLoading(false);
       }
-    );
+    };
 
-    let unsubMembers: (() => void) | undefined;
+    load();
+  }, [user?.uid]);
 
-    // If we have a logged-in user, auto-enroll them in the demo team
-    if (user?.uid) {
-      // Fire and forget — don't block UI on this
-      (async () => {
-        try {
-          const membershipId = `${DEMO_TEAM_ID}_${user.uid}`;
-          const membershipRef = doc(db, "memberships", membershipId);
-          await setDoc(
-            membershipRef,
-            {
-              teamId: DEMO_TEAM_ID,
-              userId: user.uid,
-              role: "player",
-              joinedAt: new Date(),
-            },
-            { merge: true }
-          );
-        } catch (e) {
-          console.error("Error ensuring membership", e);
-        }
-      })();
-
-      // Listen to all memberships for this team so we can show player count
-      const membershipsCol = collection(db, "memberships");
-      const q = query(membershipsCol, where("teamId", "==", DEMO_TEAM_ID));
-
-      unsubMembers = onSnapshot(
-        q,
-        (snapshot) => {
-          setMemberCount(snapshot.size);
-        },
-        (err) => {
-          console.error("Error loading members", err);
-        }
-      );
+  const handleJoinTeam = async (code: string) => {
+    if (!user?.uid) {
+      Alert.alert("Sign in required", "Please sign in to join a team.");
+      return;
     }
 
-    return () => {
-      unsubTeam();
-      if (unsubMembers) unsubMembers();
-    };
-  }, [user?.uid]);
+    const trimmed = code.trim();
+    if (!trimmed) {
+      Alert.alert("Invalid code", "Please enter a team code.");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const teamRef = doc(db, "teams", trimmed);
+      const teamSnap = await getDoc(teamRef);
+
+      if (!teamSnap.exists()) {
+        Alert.alert("Team not found", "Check the code and try again.");
+        setSaving(false);
+        return;
+      }
+
+      // Update user's teamId
+      const userRef = doc(db, "users", user.uid);
+      await setDoc(
+        userRef,
+        {
+          email: user.email ?? "",
+          teamId: trimmed,
+        },
+        { merge: true }
+      );
+
+      setTeamId(trimmed);
+      setTeam({ id: teamSnap.id, ...(teamSnap.data() as any) });
+      Alert.alert("Joined team", "You’re now part of this team!");
+    } catch (err) {
+      console.error("Error joining team:", err);
+      Alert.alert("Error", "Could not join team. Please try again.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleJoinDemoTeam = () => {
+    handleJoinTeam(DEMO_TEAM_ID);
+  };
 
   if (loading) {
     return (
-      <View style={styles.centered}>
-        <Text>Loading team...</Text>
+      <View style={styles.container}>
+        <Text>Loading team info...</Text>
       </View>
     );
   }
 
-  if (!team) {
+  if (!user) {
     return (
-      <View style={styles.centered}>
-        <Text style={styles.title}>Your Teams</Text>
-        <Text style={styles.note}>
-          No team configured yet. For now this app assumes a single demo team.
-          We&apos;ll add team creation & join codes later.
-        </Text>
+      <View style={styles.container}>
+        <Text>Please sign in to manage your team.</Text>
       </View>
     );
   }
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
+    <View style={styles.container}>
       <Text style={styles.title}>Your Team</Text>
 
-      <View style={styles.card}>
-        <Text style={styles.teamName}>{team.name || "Demo Team"}</Text>
-        {!!team.location && (
-          <Text style={styles.location}>{team.location}</Text>
-        )}
-        {!!team.description && (
-          <Text style={styles.description}>{team.description}</Text>
-        )}
-
-        <View style={styles.row}>
-          <View style={styles.statBox}>
-            <Text style={styles.statNumber}>
-              {memberCount !== null ? memberCount : "-"}
+      {teamId && team ? (
+        <View style={styles.card}>
+          <Text style={styles.teamName}>{team.name ?? team.id}</Text>
+          {team.homeCity && (
+            <Text style={styles.teamMeta}>Home: {team.homeCity}</Text>
+          )}
+          {typeof team.defaultMaxPlayers === "number" && (
+            <Text style={styles.teamMeta}>
+              Default max players: {team.defaultMaxPlayers}
             </Text>
-            <Text style={styles.statLabel}>Players</Text>
-          </View>
-          <View style={styles.statBox}>
-            <Text style={styles.statNumber}>1</Text>
-            <Text style={styles.statLabel}>Team</Text>
-          </View>
+          )}
+          <Text style={styles.teamMeta}>Team code: {team.id}</Text>
         </View>
+      ) : (
+        <View style={styles.card}>
+          <Text style={styles.teamMeta}>
+            You’re not in a team yet. Join an existing team using its code.
+          </Text>
+        </View>
+      )}
 
-        {!!team.joinCode && (
-          <View style={styles.joinBox}>
-            <Text style={styles.joinLabel}>Team join code</Text>
-            <Text style={styles.joinCode}>{team.joinCode}</Text>
-            <Text style={styles.joinHint}>
-              Share this code with friends you want to bring into your team.
-              (Joining flow coming soon.)
-            </Text>
-          </View>
-        )}
+      <View style={styles.joinSection}>
+        <Text style={styles.sectionTitle}>Join by team code</Text>
+        <TextInput
+          style={styles.input}
+          placeholder="Enter team code (e.g. demo-team)"
+          value={joinCode}
+          onChangeText={setJoinCode}
+          autoCapitalize="none"
+        />
+        <Button
+          title={saving ? "Joining..." : "Join Team"}
+          onPress={() => handleJoinTeam(joinCode)}
+          disabled={saving}
+        />
       </View>
 
-      <View style={{ marginTop: 24 }}>
-        <Text style={styles.sectionTitle}>What&apos;s next</Text>
-        <Text style={styles.note}>
-          • For now, all matches are created under this demo team.
-          {"\n"}• We&apos;ll add team creation and joining other teams next.
+      <View style={styles.demoSection}>
+        <Text style={styles.sectionTitle}>Quick start</Text>
+        <Text style={styles.teamMeta}>
+          For testing, there’s a built-in team with code <Text style={{ fontWeight: "600" }}>demo-team</Text>.
         </Text>
+        <Button title="Join demo team" onPress={handleJoinDemoTeam} />
       </View>
-    </ScrollView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    padding: 16,
-    paddingBottom: 40,
-  },
-  centered: {
-    flex: 1,
-    padding: 16,
-    justifyContent: "center",
-  },
+  container: { flex: 1, padding: 16 },
   title: {
     fontSize: 22,
-    fontWeight: "600",
+    fontWeight: "700",
     marginBottom: 16,
   },
   card: {
-    padding: 18,
-    borderRadius: 14,
-    backgroundColor: "#F2F6FF",
+    padding: 16,
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#dde3f3",
+    borderColor: "#ddd",
+    marginBottom: 24,
   },
   teamName: {
     fontSize: 20,
     fontWeight: "700",
+    marginBottom: 4,
   },
-  location: {
-    marginTop: 4,
+  teamMeta: {
+    fontSize: 14,
     color: "#555",
+    marginTop: 2,
   },
-  description: {
-    marginTop: 8,
-    color: "#444",
-  },
-  row: {
-    flexDirection: "row",
-    marginTop: 16,
-  },
-  statBox: {
-    flex: 1,
-    alignItems: "center",
-  },
-  statNumber: {
-    fontSize: 24,
-    fontWeight: "700",
-  },
-  statLabel: {
-    marginTop: 4,
-    fontSize: 12,
-    color: "#666",
-  },
-  joinBox: {
-    marginTop: 18,
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: "#dde3f3",
-  },
-  joinLabel: {
-    fontSize: 12,
-    color: "#666",
-  },
-  joinCode: {
-    marginTop: 4,
-    fontSize: 18,
-    fontWeight: "700",
-    letterSpacing: 2,
-  },
-  joinHint: {
-    marginTop: 4,
-    fontSize: 12,
-    color: "#777",
+  joinSection: {
+    marginBottom: 24,
   },
   sectionTitle: {
     fontSize: 16,
     fontWeight: "600",
+    marginBottom: 8,
   },
-  note: {
+  input: {
+    borderWidth: 1,
+    borderColor: "#ccc",
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 8,
+  },
+  demoSection: {
     marginTop: 8,
-    fontSize: 13,
-    color: "#777",
   },
 });
