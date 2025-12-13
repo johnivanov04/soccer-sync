@@ -1,7 +1,14 @@
 // app/(app)/(tabs)/profile.tsx
-import { doc, onSnapshot, updateDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc } from "firebase/firestore";
 import React, { useEffect, useState } from "react";
-import { Button, StyleSheet, Text, TextInput, View } from "react-native";
+import {
+  Alert,
+  Button,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
 
@@ -9,106 +16,144 @@ export default function ProfileScreen() {
   const { user, signOut } = useAuth();
   const [displayName, setDisplayName] = useState("");
   const [teamId, setTeamId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (!user?.uid) return;
+    if (!user) return;
 
-    const userRef = doc(db, "users", user.uid);
-    const unsub = onSnapshot(userRef, (snap) => {
-      const data = snap.data() as any | undefined;
-      if (!data) return;
-      if (typeof data.displayName === "string") {
-        setDisplayName(data.displayName);
-      }
-      if (typeof data.teamId === "string") {
-        setTeamId(data.teamId);
-      }
-    });
+    const loadProfile = async () => {
+      try {
+        const userRef = doc(db, "users", user.uid);
+        const snap = await getDoc(userRef);
 
-    return () => unsub();
+        if (snap.exists()) {
+          const data = snap.data() as any;
+          if (data.displayName) setDisplayName(data.displayName);
+          else setDisplayName(user.email?.split("@")[0] ?? "");
+
+          if (data.teamId) setTeamId(data.teamId);
+          else setTeamId(null);
+        } else {
+          // No user doc yet – fall back to email prefix
+          setDisplayName(user.email?.split("@")[0] ?? "");
+          setTeamId(null);
+        }
+      } catch (err) {
+        console.error("Error loading profile", err);
+        Alert.alert("Error", "Could not load your profile.");
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadProfile();
   }, [user?.uid]);
 
   const handleSave = async () => {
-    if (!user?.uid) return;
-    setSaving(true);
+    if (!user) return;
+    const trimmed = displayName.trim();
+
+    if (!trimmed) {
+      Alert.alert("Display name required", "Please enter a name.");
+      return;
+    }
+
     try {
-      await updateDoc(doc(db, "users", user.uid), {
-        displayName: displayName.trim(),
-      });
-    } catch (e) {
-      console.error("Error updating profile", e);
+      setSaving(true);
+      const userRef = doc(db, "users", user.uid);
+
+      await setDoc(
+        userRef,
+        {
+          displayName: trimmed,
+          updatedAt: new Date(),
+        },
+        { merge: true }
+      );
+
+      Alert.alert("Saved", "Your profile has been updated.");
+    } catch (err) {
+      console.error("Error saving profile", err);
+      Alert.alert("Error", "Could not save your profile.");
     } finally {
       setSaving(false);
     }
   };
 
-  const handleSignOut = async () => {
-    try {
-      await signOut();
-      // Root layout already switches to the auth stack when user becomes null.
-    } catch (e) {
-      console.error("Error signing out", e);
-    }
-  };
+  if (!user) {
+    return (
+      <View style={styles.container}>
+        <Text>You’re not signed in.</Text>
+      </View>
+    );
+  }
+
+  if (loading) {
+    return (
+      <View style={styles.container}>
+        <Text>Loading profile…</Text>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Your profile</Text>
+      <Text style={styles.header}>Your Profile</Text>
 
       <Text style={styles.label}>Email</Text>
-      <Text style={styles.value}>{user?.email}</Text>
+      <Text style={styles.value}>{user.email}</Text>
 
       <Text style={styles.label}>Display name</Text>
       <TextInput
         style={styles.input}
         value={displayName}
         onChangeText={setDisplayName}
-        placeholder="How teammates see you"
+        placeholder="How should teammates see you?"
       />
 
+      <Text style={styles.label}>Current team</Text>
+      <Text style={styles.value}>{teamId ?? "Not in a team yet"}</Text>
+
+      <View style={{ height: 16 }} />
       <Button
-        title={saving ? "Saving..." : "Save profile"}
+        title={saving ? "Saving…" : "Save profile"}
         onPress={handleSave}
         disabled={saving}
       />
 
-      {teamId && (
-        <>
-          <Text style={[styles.label, { marginTop: 24 }]}>Current team code</Text>
-          <Text style={styles.value}>{teamId}</Text>
-        </>
-      )}
-
-      <View style={{ height: 40 }} />
-
-      <Button title="Sign out" color="#d9534f" onPress={handleSignOut} />
+      <View style={{ height: 32 }} />
+      <Button title="Sign out" color="#d11" onPress={signOut} />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 16 },
-  title: {
+  container: {
+    flex: 1,
+    padding: 20,
+  },
+  header: {
     fontSize: 22,
     fontWeight: "600",
     marginBottom: 24,
-    textAlign: "left",
+    textAlign: "center",
   },
   label: {
-    fontSize: 14,
-    fontWeight: "500",
     marginTop: 12,
+    fontSize: 13,
+    color: "#666",
   },
   value: {
     fontSize: 16,
-    marginTop: 4,
+    marginTop: 2,
   },
   input: {
     borderWidth: 1,
     borderColor: "#ccc",
     borderRadius: 8,
-    padding: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
     marginTop: 4,
   },
 });
