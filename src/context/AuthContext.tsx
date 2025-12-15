@@ -4,6 +4,7 @@ import {
   signOut as fbSignOut,
   onAuthStateChanged,
   signInWithEmailAndPassword,
+  updateProfile,
   User,
 } from "firebase/auth";
 import { doc, serverTimestamp, setDoc } from "firebase/firestore";
@@ -19,7 +20,11 @@ interface AuthContextValue {
   user: User | null;
   initializing: boolean;
   signIn: (email: string, password: string) => Promise<void>;
-  signUp: (email: string, password: string, displayName?: string) => Promise<void>;
+  signUp: (
+    email: string,
+    password: string,
+    displayName?: string
+  ) => Promise<void>;
   signOut: () => Promise<void>;
 }
 
@@ -41,21 +46,36 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     await signInWithEmailAndPassword(auth, email, password);
   };
 
-  const signUp = async (email: string, password: string, displayName?: string) => {
+  const signUp = async (
+    email: string,
+    password: string,
+    displayName?: string
+  ) => {
+    // 1) Create the Auth user
     const cred = await createUserWithEmailAndPassword(auth, email, password);
-    const uid = cred.user.uid;
+    const fbUser = cred.user;
 
-    const friendlyName =
-      displayName?.trim() || email.split("@")[0] || "Player";
+    // 2) (Optional) update Firebase Auth profile with displayName
+    if (displayName && displayName.trim()) {
+      try {
+        await updateProfile(fbUser, { displayName: displayName.trim() });
+      } catch (err) {
+        console.warn("Could not update auth displayName", err);
+      }
+    }
 
-    // Create /users/{uid} with a default team + profile info
+    // 3) Create / update Firestore user doc, with NO teamId yet
+    const userRef = doc(db, "users", fbUser.uid);
+
     await setDoc(
-      doc(db, "users", uid),
+      userRef,
       {
-        email: cred.user.email,
-        displayName: friendlyName,
-        teamId: "demo-team",
+        email: fbUser.email ?? email,
+        ...(displayName && displayName.trim()
+          ? { displayName: displayName.trim() }
+          : {}),
         createdAt: serverTimestamp(),
+        // 👇 NO teamId here → new users start teamless
       },
       { merge: true }
     );

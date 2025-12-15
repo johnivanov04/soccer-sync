@@ -8,7 +8,7 @@ export default function SignUpScreen() {
   const router = useRouter();
   const { signUp } = useAuth();
 
-  const [name, setName] = useState("");
+  const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -16,7 +16,13 @@ export default function SignUpScreen() {
   const handleSignUp = async () => {
     try {
       setError("");
-      await signUp(email.trim(), password, name.trim());
+
+      if (!displayName.trim()) {
+        setError("Please enter a display name.");
+        return;
+      }
+
+      await signUp(email.trim(), password, displayName.trim());
       router.replace("/(app)/(tabs)/matches");
     } catch (e: any) {
       console.error(e);
@@ -31,9 +37,9 @@ export default function SignUpScreen() {
 
       <TextInput
         style={styles.input}
-        placeholder="Name (what teammates see)"
-        value={name}
-        onChangeText={setName}
+        placeholder="Display name (what other players see)"
+        value={displayName}
+        onChangeText={setDisplayName}
       />
 
       <TextInput
@@ -64,7 +70,12 @@ export default function SignUpScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 24, justifyContent: "center" },
-  title: { fontSize: 24, fontWeight: "bold", marginBottom: 24, textAlign: "center" },
+  title: {
+    fontSize: 24,
+    fontWeight: "bold",
+    marginBottom: 24,
+    textAlign: "center",
+  },
   input: {
     borderWidth: 1,
     borderColor: "#ccc",
