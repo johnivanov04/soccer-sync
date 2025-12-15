@@ -156,11 +156,11 @@ export default function MatchDetailScreen() {
 
   const date =
     match.startDateTime?.toDate?.() || new Date(match.startDateTime);
-
   const going = rsvps.filter((r) => r.status === "yes");
 
+  // Status + host info
   const status: string = match.status ?? "scheduled";
-  const isHost = user?.uid && match.createdBy === user.uid;
+  const isHost = !!user?.uid && match.createdBy === user.uid;
   const isScheduled = status === "scheduled";
 
   const statusLabel =
@@ -169,6 +169,35 @@ export default function MatchDetailScreen() {
       : status === "played"
       ? "Played"
       : "Scheduled";
+
+  // Capacity / min players logic
+  const confirmedYesCount: number =
+    typeof match.confirmedYesCount === "number"
+      ? match.confirmedYesCount
+      : going.length;
+
+  const maxPlayers: number = match.maxPlayers ?? 0;
+  const minPlayers: number = match.minPlayers ?? 0;
+
+  const isFull =
+    isScheduled && maxPlayers > 0 && confirmedYesCount >= maxPlayers;
+  const playersNeededForMin = Math.max(0, minPlayers - confirmedYesCount);
+
+  // Per-button enable/disable logic
+  const isRsvpEnabledForStatus = (statusOption: RsvpStatus) => {
+    if (!isScheduled) return false;
+
+    // If match is full, only allow:
+    // - host to adjust
+    // - a user who is already YES to change (YES -> maybe/no is allowed)
+    if (statusOption === "yes" && isFull) {
+      if (isHost) return true;
+      if (userStatus === "yes") return true; // lets them back out
+      return false; // can't newly switch to YES when full
+    }
+
+    return true;
+  };
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
@@ -189,22 +218,46 @@ export default function MatchDetailScreen() {
           {statusLabel}
         </Text>
         <Text style={styles.goingText}>
-          {going.length}/{match.maxPlayers} going
+          {confirmedYesCount}/{maxPlayers || "?"} going
         </Text>
       </View>
 
+      {playersNeededForMin > 0 && isScheduled && (
+        <Text style={styles.minPlayersText}>
+          Need {playersNeededForMin} more player
+          {playersNeededForMin > 1 ? "s" : ""} to hit the minimum of{" "}
+          {minPlayers}.
+        </Text>
+      )}
+
       <Text style={styles.sectionTitle}>Your RSVP</Text>
       {isScheduled ? (
-        <View style={styles.rsvpRow}>
-          {RSVP_STATUSES.map((statusOption) => (
-            <Button
-              key={statusOption}
-              title={statusOption.toUpperCase()}
-              color={userStatus === statusOption ? "#007AFF" : "#aaa"}
-              onPress={() => handleRsvp(statusOption)}
-            />
-          ))}
-        </View>
+        <>
+          <View style={styles.rsvpRow}>
+            {RSVP_STATUSES.map((statusOption) => {
+              const enabled = isRsvpEnabledForStatus(statusOption);
+              return (
+                <Button
+                  key={statusOption}
+                  title={statusOption.toUpperCase()}
+                  color={userStatus === statusOption ? "#007AFF" : "#aaa"}
+                  disabled={!enabled}
+                  onPress={() => {
+                    if (!enabled) return;
+                    handleRsvp(statusOption);
+                  }}
+                />
+              );
+            })}
+          </View>
+
+          {isFull && userStatus !== "yes" && !isHost && (
+            <Text style={styles.fullNote}>
+              This match is currently full. You can still change your answer to
+              NO if you’re not coming.
+            </Text>
+          )}
+        </>
       ) : (
         <Text style={{ marginTop: 8 }}>
           RSVPs are closed for this match ({statusLabel.toLowerCase()}).
@@ -283,5 +336,15 @@ const styles = StyleSheet.create({
   goingText: {
     fontSize: 14,
     color: "#333",
+  },
+  minPlayersText: {
+    marginTop: 8,
+    fontSize: 13,
+    color: "#555",
+  },
+  fullNote: {
+    marginTop: 8,
+    fontSize: 12,
+    color: "#B00020",
   },
 });
