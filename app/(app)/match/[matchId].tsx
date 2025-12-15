@@ -274,6 +274,19 @@ export default function MatchDetailScreen() {
         <>
           <Text style={styles.sectionTitle}>Host tools</Text>
 
+          {/* NEW: Edit match button */}
+          <View style={{ marginVertical: 4 }}>
+            <Button
+              title="Edit match details"
+              onPress={() =>
+                router.push({
+                  pathname: "/(app)/match/edit",
+                  params: { matchId: String(matchId) },
+                })
+              }
+            />
+          </View>
+
           {status !== "played" && (
             <View style={{ marginVertical: 4 }}>
               <Button
