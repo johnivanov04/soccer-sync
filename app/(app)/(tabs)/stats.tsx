@@ -18,6 +18,7 @@ type Rsvp = {
   id: string;
   matchId: string;
   status: RsvpStatus;
+  isWaitlisted?: boolean; // 👈 new
 };
 
 type FitnessSummary = {
@@ -54,6 +55,8 @@ export default function StatsScreen() {
             id: d.id,
             matchId: data.matchId,
             status: data.status as RsvpStatus,
+            // old docs won't have isWaitlisted set, so default to false
+            isWaitlisted: data.isWaitlisted ?? false,
           };
         });
 
@@ -104,7 +107,8 @@ export default function StatsScreen() {
         let lastPlayedDate: Date | null = null;
 
         for (const r of rsvps) {
-          if (r.status !== "yes") continue;
+          // 👇 Only count confirmed YES (not waitlisted) towards fitness
+          if (r.status !== "yes" || r.isWaitlisted) continue;
           yesTotal++;
 
           const match = matchesById[r.matchId];
@@ -170,7 +174,8 @@ export default function StatsScreen() {
             <Text style={styles.bigNumber}>{summary.sessionsPlayed}</Text>
             <Text style={styles.mainLabel}>Matches played</Text>
             <Text style={styles.mainSub}>
-              Counted only from matches marked as “Played” where you RSVP’d YES.
+              Counted only from matches marked as “Played” where you RSVP’d YES
+              (and weren’t waitlisted).
             </Text>
 
             <Text style={[styles.mainSub, { marginTop: 12 }]}>
@@ -203,7 +208,9 @@ export default function StatsScreen() {
               <Text style={styles.smallNumber}>
                 {summary.upcomingYes}
               </Text>
-              <Text style={styles.smallLabel}>Upcoming matches (YES)</Text>
+              <Text style={styles.smallLabel}>
+                Upcoming matches (confirmed YES)
+              </Text>
             </View>
           </View>
 
@@ -213,11 +220,15 @@ export default function StatsScreen() {
               <Text style={styles.smallNumber}>
                 {summary.cancelledYes}
               </Text>
-              <Text style={styles.smallLabel}>Cancelled you were in for</Text>
+              <Text style={styles.smallLabel}>
+                Cancelled matches you were in for
+              </Text>
             </View>
             <View style={styles.smallCard}>
               <Text style={styles.smallNumber}>{summary.yesTotal}</Text>
-              <Text style={styles.smallLabel}>Total YES RSVPs</Text>
+              <Text style={styles.smallLabel}>
+                Total confirmed YES RSVPs
+              </Text>
             </View>
           </View>
 
@@ -230,9 +241,9 @@ export default function StatsScreen() {
 
           {summary.sessionsPlayed > 0 && (
             <Text style={styles.note}>
-              This is v1: every “Played” match with a YES RSVP counts as a full{" "}
-              {EST_MIN_PER_MATCH}-minute session. Later we can upgrade this to
-              use real minutes and position-based load.
+              This is v1: every “Played” match with a confirmed YES RSVP counts
+              as a full {EST_MIN_PER_MATCH}-minute session. Later we can
+              upgrade this to use real minutes and position-based load.
             </Text>
           )}
         </>
