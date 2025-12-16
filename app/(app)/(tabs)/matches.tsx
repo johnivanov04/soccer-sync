@@ -3,6 +3,7 @@ import { useRouter } from "expo-router";
 import {
   collection,
   doc,
+  getDoc,
   onSnapshot,
   orderBy,
   query,
@@ -20,15 +21,53 @@ import {
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
 
+type MatchStatus = "scheduled" | "played" | "cancelled" | string;
+
 type Match = {
   id: string;
+  teamId: string;
   startDateTime?: any;
   locationText?: string;
   maxPlayers?: number;
+  minPlayers?: number;
   confirmedYesCount?: number;
-  status?: string;
+  waitlistCount?: number;
+  status?: MatchStatus;
   createdBy?: string;
 };
+
+function toDate(raw: any): Date {
+  if (!raw) return new Date();
+  if (typeof raw?.toDate === "function") return raw.toDate();
+  return new Date(raw);
+}
+
+function getChip(match: Match) {
+  const status = (match.status ?? "scheduled").toLowerCase();
+
+  if (status === "cancelled") {
+    return { label: "Cancelled", variant: "cancelled" as const };
+  }
+  if (status === "played") {
+    return { label: "Played", variant: "played" as const };
+  }
+
+  const confirmed = match.confirmedYesCount ?? 0;
+  const minPlayers = match.minPlayers ?? 0;
+
+  const start = toDate(match.startDateTime);
+  const hoursToStart = (start.getTime() - Date.now()) / (1000 * 60 * 60);
+
+  if (minPlayers > 0 && confirmed >= minPlayers) {
+    return { label: "On track", variant: "ontrack" as const };
+  }
+
+  if (hoursToStart <= 24) {
+    return { label: "At risk", variant: "atrisk" as const };
+  }
+
+  return { label: "Needs players", variant: "needs" as const };
+}
 
 export default function MatchesScreen() {
   const router = useRouter();
@@ -39,9 +78,8 @@ export default function MatchesScreen() {
   const [teamLoading, setTeamLoading] = useState(true);
 
   const [matches, setMatches] = useState<Match[]>([]);
-  const [matchesLoading, setMatchesLoading] = useState(false);
 
-  // Watch the user doc to get teamId / teamName
+  // 1) Load current user's teamId (and maybe teamName if it exists on user doc)
   useEffect(() => {
     if (!user?.uid) {
       setTeamId(null);
@@ -50,40 +88,71 @@ export default function MatchesScreen() {
       return;
     }
 
-    const userRef = doc(db, "users", user.uid);
-    const unsubscribe = onSnapshot(
-      userRef,
-      (snap) => {
+    setTeamLoading(true);
+
+    const load = async () => {
+      try {
+        const userRef = doc(db, "users", user.uid);
+        const snap = await getDoc(userRef);
+
         if (snap.exists()) {
           const data = snap.data() as any;
-          const currentTeamId = data.teamId ?? null;
-          setTeamId(currentTeamId);
-          setTeamName(data.teamName ?? currentTeamId);
+          setTeamId(data.teamId ?? null);
+
+          // keep this as a fallback (some older user docs still have it)
+          setTeamName(data.teamName ?? null);
         } else {
           setTeamId(null);
           setTeamName(null);
         }
-        setTeamLoading(false);
-      },
-      (err) => {
-        console.error("Error loading user doc in MatchesScreen", err);
+      } catch (e) {
+        console.error("Error loading user team", e);
         setTeamId(null);
         setTeamName(null);
+      } finally {
         setTeamLoading(false);
+      }
+    };
+
+    load();
+  }, [user?.uid]);
+
+  // 2) Always resolve team name from teams/{teamId} so the UI is consistent
+  useEffect(() => {
+    if (!teamId) {
+      setTeamName(null);
+      return;
+    }
+
+    const teamRef = doc(db, "teams", teamId);
+    const unsub = onSnapshot(
+      teamRef,
+      (snap) => {
+        if (snap.exists()) {
+          const data = snap.data() as any;
+          // Use whichever field name you used in teams docs:
+          // common: name
+          // fallback: teamName
+          setTeamName(data.name ?? data.teamName ?? teamId);
+        } else {
+          setTeamName(teamId);
+        }
+      },
+      (err) => {
+        console.error("Team doc listener error", err);
+        setTeamName(teamId); // fallback
       }
     );
 
-    return () => unsubscribe();
-  }, [user?.uid]);
+    return () => unsub();
+  }, [teamId]);
 
-  // Subscribe to matches for that team
+  // 3) Subscribe to matches for team
   useEffect(() => {
     if (!teamId) {
       setMatches([]);
       return;
     }
-
-    setMatchesLoading(true);
 
     const matchesCol = collection(db, "matches");
     const q = query(
@@ -92,32 +161,31 @@ export default function MatchesScreen() {
       orderBy("startDateTime", "asc")
     );
 
-    const unsubscribe = onSnapshot(
+    const unsub = onSnapshot(
       q,
       (snapshot) => {
-        const data: Match[] = snapshot.docs
-          .map((d) => ({ id: d.id, ...(d.data() as any) }))
-          .filter((m) => m.status !== "canceled");
-
+        const data: Match[] = snapshot.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as any),
+        }));
         setMatches(data);
-        setMatchesLoading(false);
       },
       (err) => {
-        console.error("Error loading matches", err);
-        setMatches([]);
-        setMatchesLoading(false);
+        console.error("Matches subscription error", err);
       }
     );
 
-    return () => unsubscribe();
+    return () => unsub();
   }, [teamId]);
 
   const renderItem = ({ item }: { item: Match }) => {
-    const date =
-      item.startDateTime?.toDate?.() ||
-      (item.startDateTime ? new Date(item.startDateTime) : null);
+    const date = toDate(item.startDateTime);
+    const chip = getChip(item);
 
     const isHost = !!user?.uid && item.createdBy === user.uid;
+    const confirmed = item.confirmedYesCount ?? 0;
+    const max = item.maxPlayers ?? 0;
+    const waitlist = item.waitlistCount ?? 0;
 
     return (
       <TouchableOpacity
@@ -129,57 +197,40 @@ export default function MatchesScreen() {
           })
         }
       >
-        <View style={styles.titleRow}>
-          {date && (
-            <Text style={styles.title}>
-              {date.toLocaleDateString()}{" "}
-              {date.toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              })}
-            </Text>
-          )}
+        <View style={styles.cardTopRow}>
+          <Text style={styles.title}>
+            {date.toLocaleDateString()}{" "}
+            {date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+          </Text>
 
-          {isHost && (
-            <View style={styles.hostPill}>
-              <Text style={styles.hostPillText}>You</Text>
-            </View>
-          )}
+          <View style={[styles.chip, styles[`chip_${chip.variant}`]]}>
+            <Text style={styles.chipText}>{chip.label}</Text>
+          </View>
         </View>
 
         {!!item.locationText && (
           <Text style={styles.location}>{item.locationText}</Text>
         )}
 
-        <Text style={styles.subtitle}>
-          {item.confirmedYesCount ?? 0}/{item.maxPlayers ?? 0} going
-        </Text>
+        <View style={styles.metaRow}>
+          <Text style={styles.subtitle}>
+            {confirmed}/{max} going
+          </Text>
 
-        {item.status &&
-          item.status !== "scheduled" &&
-          item.status !== "published" && (
-            <Text style={styles.statusTag}>
-              {item.status.toUpperCase()}
-            </Text>
+          {waitlist > 0 && (
+            <Text style={styles.waitlistText}>⏳ {waitlist} waitlist</Text>
           )}
+
+          {isHost && <Text style={styles.hostBadge}>👑 Host</Text>}
+        </View>
       </TouchableOpacity>
     );
   };
 
-  // States
-
-  if (!user?.uid) {
-    return (
-      <View style={styles.container}>
-        <Text>Please sign in to view matches.</Text>
-      </View>
-    );
-  }
-
   if (teamLoading) {
     return (
       <View style={styles.container}>
-        <Text>Loading your team...</Text>
+        <Text>Loading your team…</Text>
       </View>
     );
   }
@@ -187,8 +238,9 @@ export default function MatchesScreen() {
   if (!teamId) {
     return (
       <View style={styles.container}>
-        <Text style={{ marginBottom: 12 }}>
-          You’re not in a team yet. Join or create one from the Teams tab.
+        <Text style={styles.noTeamTitle}>You’re not on a team yet.</Text>
+        <Text style={styles.noTeamSub}>
+          Join or create a team in the Teams tab to see and create matches.
         </Text>
         <Button
           title="Go to Teams"
@@ -200,28 +252,24 @@ export default function MatchesScreen() {
 
   return (
     <View style={styles.container}>
-      {teamName && (
-        <Text style={styles.teamHeader}>Matches for {teamName}</Text>
-      )}
+      <Text style={styles.teamTag}>Team: {teamName ?? teamId}</Text>
 
       <Button
         title="Create Match"
         onPress={() => router.push("/(app)/match/create")}
       />
 
-      {matchesLoading && matches.length === 0 ? (
-        <Text style={{ marginTop: 16 }}>Loading matches...</Text>
-      ) : matches.length === 0 ? (
+      <FlatList
+        data={matches}
+        keyExtractor={(item) => item.id}
+        renderItem={renderItem}
+        contentContainerStyle={{ paddingVertical: 12 }}
+      />
+
+      {matches.length === 0 && (
         <Text style={{ marginTop: 16, textAlign: "center" }}>
-          No upcoming matches yet. Tap “Create Match” to schedule one.
+          No matches yet. Create one!
         </Text>
-      ) : (
-        <FlatList
-          data={matches}
-          keyExtractor={(item) => item.id}
-          renderItem={renderItem}
-          contentContainerStyle={{ paddingVertical: 12 }}
-        />
       )}
     </View>
   );
@@ -229,38 +277,70 @@ export default function MatchesScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 16 },
-  teamHeader: { fontWeight: "600", marginBottom: 8 },
+
+  teamTag: {
+    marginBottom: 10,
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    backgroundColor: "#E6F4FF",
+    borderRadius: 999,
+    alignSelf: "flex-start",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+
   card: {
     padding: 12,
-    marginTop: 12,
-    borderRadius: 8,
+    marginBottom: 10,
+    borderRadius: 10,
     borderColor: "#ddd",
     borderWidth: 1,
   },
-  titleRow: {
+
+  cardTopRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    gap: 10,
   },
-  title: { fontWeight: "bold" },
-  hostPill: {
+
+  title: { fontWeight: "bold", flex: 1 },
+  location: { marginTop: 6, color: "#555" },
+
+  metaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginTop: 8,
+    flexWrap: "wrap",
+  },
+
+  subtitle: { color: "#777" },
+
+  hostBadge: {
+    backgroundColor: "#FFF3CD",
+    paddingVertical: 3,
     paddingHorizontal: 8,
-    paddingVertical: 2,
     borderRadius: 999,
-    backgroundColor: "#E6F4FF",
-  },
-  hostPillText: {
-    fontSize: 11,
-    fontWeight: "600",
-    color: "#007AFF",
-  },
-  location: { marginTop: 4, color: "#555" },
-  subtitle: { marginTop: 4, color: "#777" },
-  statusTag: {
-    marginTop: 6,
     fontSize: 12,
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-    color: "#888",
+    fontWeight: "600",
   },
+
+  waitlistText: { color: "#7a4d00" },
+
+  chip: {
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+  },
+  chipText: { fontSize: 12, fontWeight: "700" },
+
+  chip_ontrack: { backgroundColor: "#DFF7E3" },
+  chip_needs: { backgroundColor: "#EDEDED" },
+  chip_atrisk: { backgroundColor: "#FFE1E1" },
+  chip_cancelled: { backgroundColor: "#F2F2F2" },
+  chip_played: { backgroundColor: "#E6F4FF" },
+
+  noTeamTitle: { fontSize: 18, fontWeight: "700" },
+  noTeamSub: { marginTop: 8, marginBottom: 16, color: "#555" },
 });
