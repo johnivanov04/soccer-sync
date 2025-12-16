@@ -32,6 +32,7 @@ type Match = {
   confirmedYesCount?: number;
   waitlistCount?: number;
   status?: MatchStatus;
+  rsvpDeadline?: any;
   createdBy?: string;
 };
 
@@ -41,10 +42,15 @@ function toDate(raw: any): Date {
   return new Date(raw);
 }
 
-function getChip(match: Match) {
-  const status = (match.status ?? "scheduled").toLowerCase();
+function normalizeStatus(s?: string) {
+  return (s ?? "scheduled").toLowerCase();
+}
 
-  if (status === "cancelled") {
+function getChip(match: Match) {
+  const status = normalizeStatus(match.status);
+
+  // terminal states
+  if (status === "cancelled" || status === "canceled") {
     return { label: "Cancelled", variant: "cancelled" as const };
   }
   if (status === "played") {
@@ -53,19 +59,39 @@ function getChip(match: Match) {
 
   const confirmed = match.confirmedYesCount ?? 0;
   const minPlayers = match.minPlayers ?? 0;
+  const maxPlayers = match.maxPlayers ?? 0;
 
-  const start = toDate(match.startDateTime);
-  const hoursToStart = (start.getTime() - Date.now()) / (1000 * 60 * 60);
-
-  if (minPlayers > 0 && confirmed >= minPlayers) {
-    return { label: "On track", variant: "ontrack" as const };
+  // RSVP deadline-based chip (only for scheduled matches)
+  if (match.rsvpDeadline) {
+    const deadline = toDate(match.rsvpDeadline);
+    if (Date.now() > deadline.getTime()) {
+      return { label: "RSVP closed", variant: "closed" as const };
+    }
   }
 
+  // capacity chip
+  if (maxPlayers > 0 && confirmed >= maxPlayers) {
+    return { label: "Full", variant: "full" as const };
+  }
+
+  // “On track / Needs X”
+  if (minPlayers > 0) {
+    const needed = Math.max(0, minPlayers - confirmed);
+    if (needed === 0) {
+      return { label: "On track", variant: "ontrack" as const };
+    }
+    // show exact number needed (more actionable than generic “Needs players”)
+    return { label: `Needs ${needed}`, variant: "needs" as const };
+  }
+
+  // time-to-start risk (fallback when no minPlayers)
+  const start = toDate(match.startDateTime);
+  const hoursToStart = (start.getTime() - Date.now()) / (1000 * 60 * 60);
   if (hoursToStart <= 24) {
     return { label: "At risk", variant: "atrisk" as const };
   }
 
-  return { label: "Needs players", variant: "needs" as const };
+  return { label: "Scheduled", variant: "scheduled" as const };
 }
 
 export default function MatchesScreen() {
@@ -78,8 +104,7 @@ export default function MatchesScreen() {
 
   const [matches, setMatches] = useState<Match[]>([]);
 
-  // 1) LIVE subscribe to current user's teamId (and maybe teamName if it exists on user doc)
-  //    This fixes the “joined team but Matches still says not on a team” issue.
+  // 1) LIVE subscribe to current user's teamId
   useEffect(() => {
     if (!user?.uid) {
       setTeamId(null);
@@ -91,27 +116,20 @@ export default function MatchesScreen() {
     setTeamLoading(true);
 
     const userRef = doc(db, "users", user.uid);
-
     const unsub = onSnapshot(
       userRef,
       (snap) => {
         if (snap.exists()) {
           const data = snap.data() as any;
-
-          // Canonical: teamId
-          // Extra fallbacks just in case older code wrote a different key:
           const nextTeamId =
             data.teamId ?? data.teamCode ?? data.team ?? data.team_id ?? null;
 
           setTeamId(nextTeamId ?? null);
-
-          // keep this as a fallback (some older user docs still have it)
-          setTeamName(data.teamName ?? null);
+          setTeamName(data.teamName ?? null); // fallback (older docs)
         } else {
           setTeamId(null);
           setTeamName(null);
         }
-
         setTeamLoading(false);
       },
       (err) => {
@@ -125,7 +143,7 @@ export default function MatchesScreen() {
     return () => unsub();
   }, [user?.uid]);
 
-  // 2) Always resolve team name from teams/{teamId} so the UI is consistent
+  // 2) Resolve team name from teams/{teamId}
   useEffect(() => {
     if (!teamId) {
       setTeamName(null);
@@ -138,9 +156,6 @@ export default function MatchesScreen() {
       (snap) => {
         if (snap.exists()) {
           const data = snap.data() as any;
-          // Use whichever field name you used in teams docs:
-          // common: name
-          // fallback: teamName
           setTeamName(data.name ?? data.teamName ?? teamId);
         } else {
           setTeamName(teamId);
@@ -148,7 +163,7 @@ export default function MatchesScreen() {
       },
       (err) => {
         console.error("Team doc listener error", err);
-        setTeamName(teamId); // fallback
+        setTeamName(teamId);
       }
     );
 
@@ -222,7 +237,7 @@ export default function MatchesScreen() {
 
         <View style={styles.metaRow}>
           <Text style={styles.subtitle}>
-            {confirmed}/{max} going
+            {confirmed}/{max || "?"} going
           </Text>
 
           {waitlist > 0 && (
@@ -348,6 +363,11 @@ const styles = StyleSheet.create({
   chip_atrisk: { backgroundColor: "#FFE1E1" },
   chip_cancelled: { backgroundColor: "#F2F2F2" },
   chip_played: { backgroundColor: "#E6F4FF" },
+
+  // NEW variants
+  chip_full: { backgroundColor: "#FFE7B8" },
+  chip_closed: { backgroundColor: "#E9E3FF" },
+  chip_scheduled: { backgroundColor: "#EDEDED" },
 
   noTeamTitle: { fontSize: 18, fontWeight: "700" },
   noTeamSub: { marginTop: 8, marginBottom: 16, color: "#555" },
