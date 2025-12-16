@@ -12,16 +12,10 @@ import {
   where,
 } from "firebase/firestore";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import {
-  Alert,
-  Button,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
+import { Alert, Button, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
+import { addMatchToCalendar } from "../../../src/utils/calendarExport";
 
 const RSVP_STATUSES = ["yes", "maybe", "no"] as const;
 type RsvpStatus = (typeof RSVP_STATUSES)[number];
@@ -69,6 +63,8 @@ export default function MatchDetailScreen() {
   const [rsvps, setRsvps] = useState<Rsvp[]>([]);
   const [userStatus, setUserStatus] = useState<RsvpStatus | null>(null);
   const [loadingMatch, setLoadingMatch] = useState(true);
+
+  const [exportingCalendar, setExportingCalendar] = useState(false);
 
   const promotionInFlightRef = useRef(false);
   const prevWaitlistedRef = useRef<boolean | null>(null);
@@ -124,7 +120,11 @@ export default function MatchDetailScreen() {
 
           // Promotion toast/alert (only after initial load)
           if (prevWaitlistedRef.current !== null) {
-            if (prevWaitlistedRef.current === true && nowWaitlisted === false && mine?.status === "yes") {
+            if (
+              prevWaitlistedRef.current === true &&
+              nowWaitlisted === false &&
+              mine?.status === "yes"
+            ) {
               Alert.alert("You’re in!", "A spot opened up — you’re now confirmed.");
             }
           }
@@ -176,8 +176,7 @@ export default function MatchDetailScreen() {
 
   /**
    * Auto-promote earliest waitlisted YES into confirmed if a spot exists.
-   * NOTE: This is a client-side best-effort implementation. For perfect behavior under
-   * concurrency, move this logic to a Cloud Function later.
+   * NOTE: This is client-side best-effort. For perfect behavior under concurrency, use a Cloud Function later.
    */
   const autoPromoteWaitlistIfNeeded = async (maxPlayers: number) => {
     if (!matchId) return;
@@ -186,7 +185,6 @@ export default function MatchDetailScreen() {
     const status = ((match?.status ?? "scheduled") as string).toLowerCase();
     if (status === "played" || status === "cancelled" || status === "canceled") return;
 
-    // No capacity => no waitlist => nothing to promote
     if (!Number.isFinite(maxPlayers) || maxPlayers <= 0) return;
 
     try {
@@ -194,7 +192,6 @@ export default function MatchDetailScreen() {
 
       const rsvpsCol = collection(db, "rsvps");
 
-      // Current confirmed YES count (server-truth)
       const confirmedQuery = query(
         rsvpsCol,
         where("matchId", "==", String(matchId)),
@@ -206,7 +203,6 @@ export default function MatchDetailScreen() {
 
       if (openSlots <= 0) return;
 
-      // Get all waitlisted YES, then sort client-side by updatedAt (earliest first)
       const waitlistQuery = query(
         rsvpsCol,
         where("matchId", "==", String(matchId)),
@@ -218,14 +214,13 @@ export default function MatchDetailScreen() {
       if (waitlistSnap.empty) return;
 
       const waitlistedDocs = waitlistSnap.docs
-        .map((d) => ({ id: d.id, ref: d.ref, data: d.data() as any }))
+        .map((d) => ({ ref: d.ref, data: d.data() as any }))
         .sort((a, b) => toMillis(a.data.updatedAt) - toMillis(b.data.updatedAt));
 
       const promoteCount = Math.min(openSlots, waitlistedDocs.length);
 
       for (let i = 0; i < promoteCount; i++) {
-        const target = waitlistedDocs[i];
-        await updateDoc(target.ref, {
+        await updateDoc(waitlistedDocs[i].ref, {
           isWaitlisted: false,
           updatedAt: new Date(),
         });
@@ -252,13 +247,9 @@ export default function MatchDetailScreen() {
       const matchData = matchSnap.data() as any;
       const maxPlayers: number = matchData.maxPlayers ?? 0;
 
-      // Status-based blocking (cancelled / played)
       const matchStatus = (matchData.status ?? "scheduled").toLowerCase();
       if (matchStatus === "cancelled" || matchStatus === "canceled") {
-        Alert.alert(
-          "Match cancelled",
-          "You can’t change RSVP for a cancelled match."
-        );
+        Alert.alert("Match cancelled", "You can’t change RSVP for a cancelled match.");
         return;
       }
       if (matchStatus === "played") {
@@ -266,7 +257,6 @@ export default function MatchDetailScreen() {
         return;
       }
 
-      // Deadline-based blocking
       if (matchData.rsvpDeadline) {
         const deadline =
           typeof matchData.rsvpDeadline?.toDate === "function"
@@ -285,11 +275,9 @@ export default function MatchDetailScreen() {
       const rsvpId = `${matchId}_${user.uid}`;
       const rsvpRef = doc(db, "rsvps", rsvpId);
 
-      // Decide if this RSVP should be waitlisted
       let isWaitlisted = false;
 
       if (status === "yes") {
-        // Only waitlist if maxPlayers is a real capacity (> 0)
         if (maxPlayers > 0) {
           const rsvpsCol = collection(db, "rsvps");
           const confirmedQuery = query(
@@ -299,24 +287,19 @@ export default function MatchDetailScreen() {
             where("isWaitlisted", "==", false)
           );
           const confirmedSnap = await getDocs(confirmedQuery);
-          const confirmedCount = confirmedSnap.size;
-
-          if (confirmedCount >= maxPlayers) {
+          if (confirmedSnap.size >= maxPlayers) {
             isWaitlisted = true;
           }
         }
       }
 
-      // Get player name from /users/{uid}
       let playerName = user.email ?? user.uid;
       try {
         const userDocRef = doc(db, "users", user.uid);
         const userSnap = await getDoc(userDocRef);
         if (userSnap.exists()) {
           const data = userSnap.data() as any;
-          if (data?.displayName) {
-            playerName = data.displayName;
-          }
+          if (data?.displayName) playerName = data.displayName;
         }
       } catch (innerErr) {
         console.warn("Could not load user profile for RSVP", innerErr);
@@ -337,8 +320,6 @@ export default function MatchDetailScreen() {
 
       setUserStatus(status);
 
-      // NEW: after any RSVP update, try to promote from waitlist if a spot opened,
-      // then recompute counts.
       await autoPromoteWaitlistIfNeeded(maxPlayers);
       await recomputeYesCount();
 
@@ -354,8 +335,7 @@ export default function MatchDetailScreen() {
     }
   };
 
-  // If host changes maxPlayers in Edit screen while this is open, we can also promote automatically.
-  // This keeps things consistent without needing the host to do anything else.
+  // If host changes maxPlayers while this screen is open, promote if needed.
   useEffect(() => {
     const maxPlayers = match?.maxPlayers ?? 0;
     if (!matchId) return;
@@ -370,16 +350,13 @@ export default function MatchDetailScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [match?.maxPlayers, rsvps.length]);
 
-  // Host controls (status updates)
+  // Host controls
   const isHost = useMemo(() => {
     return !!user?.uid && !!match?.createdBy && match.createdBy === user.uid;
   }, [user?.uid, match?.createdBy]);
 
-  const setMatchStatus = async (
-    nextStatus: "scheduled" | "played" | "cancelled"
-  ) => {
+  const setMatchStatus = async (nextStatus: "scheduled" | "played" | "cancelled") => {
     if (!matchId) return;
-
     try {
       const matchRef = doc(db, "matches", String(matchId));
       await updateDoc(matchRef, { status: nextStatus, updatedAt: new Date() });
@@ -390,12 +367,56 @@ export default function MatchDetailScreen() {
   };
 
   const confirmStatusChange = (nextStatus: "played" | "cancelled") => {
-    const label =
-      nextStatus === "played" ? "mark this match as played" : "cancel this match";
+    const label = nextStatus === "played" ? "mark this match as played" : "cancel this match";
     Alert.alert("Confirm", `Are you sure you want to ${label}?`, [
       { text: "No", style: "cancel" },
       { text: "Yes", style: "destructive", onPress: () => setMatchStatus(nextStatus) },
     ]);
+  };
+
+  // ✅ expo-calendar implementation
+  const handleAddToCalendar = async () => {
+    if (!matchId || !match) return;
+
+    try {
+      setExportingCalendar(true);
+
+      const startAt = toDate(match.startDateTime);
+      const endAt = new Date(startAt.getTime() + 90 * 60 * 1000);
+
+      const deadlineText = match.rsvpDeadline
+        ? `RSVP deadline: ${toDate(match.rsvpDeadline).toLocaleString()}`
+        : "";
+
+      const notes = [
+        "Pickup soccer match",
+        match.locationText ? `Location: ${match.locationText}` : "",
+        deadlineText,
+        `Match ID: ${String(matchId)}`,
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      const res = await addMatchToCalendar({
+        id: String(matchId),
+        title: "Pickup Soccer",
+        startAt,
+        endAt,
+        location: match.locationText ?? "",
+        notes,
+      });
+
+      // If user cancels the OS dialog, do nothing.
+      if ((res.action || "").toLowerCase().includes("cancel")) return;
+    } catch (e: any) {
+      console.error("Calendar export error", e);
+      Alert.alert(
+        "Couldn’t add to calendar",
+        e?.message ?? "Unknown error. Did you allow calendar permissions?"
+      );
+    } finally {
+      setExportingCalendar(false);
+    }
   };
 
   if (loadingMatch || !match) {
@@ -429,9 +450,7 @@ export default function MatchDetailScreen() {
         {date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
       </Text>
 
-      {!!match.locationText && (
-        <Text style={styles.location}>{match.locationText}</Text>
-      )}
+      {!!match.locationText && <Text style={styles.location}>{match.locationText}</Text>}
 
       <View style={{ marginTop: 10 }}>
         <Text style={styles.statusPill}>Status: {statusText}</Text>
@@ -441,6 +460,15 @@ export default function MatchDetailScreen() {
         {going.length}/{match.maxPlayers ?? "?"} going
         {waitlist.length > 0 ? ` • ${waitlist.length} waitlist` : ""}
       </Text>
+
+      {/* Calendar button */}
+      <View style={{ marginTop: 12, alignSelf: "flex-start" }}>
+        <Button
+          title={exportingCalendar ? "Opening calendar..." : "Add to Calendar"}
+          onPress={handleAddToCalendar}
+          disabled={exportingCalendar}
+        />
+      </View>
 
       <Text style={styles.sectionTitle}>Your RSVP</Text>
       <View style={styles.rsvpRow}>
@@ -494,10 +522,7 @@ export default function MatchDetailScreen() {
           </View>
 
           <View style={{ marginTop: 8 }}>
-            <Button
-              title="Mark as played"
-              onPress={() => confirmStatusChange("played")}
-            />
+            <Button title="Mark as played" onPress={() => confirmStatusChange("played")} />
           </View>
 
           <View style={{ marginTop: 8 }}>

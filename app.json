@@ -38,6 +38,12 @@
             "backgroundColor": "#000000"
           }
         }
+      ],
+      [
+        "expo-calendar",
+        {
+          "calendarPermission": "Allow SoccerSync to add matches to your calendar."
+        }
       ]
     ],
     "experiments": {
