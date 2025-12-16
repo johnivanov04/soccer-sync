@@ -11,7 +11,7 @@ import {
   updateDoc,
   where,
 } from "firebase/firestore";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -44,12 +44,20 @@ type Rsvp = {
   playerName?: string;
   status?: RsvpStatus;
   isWaitlisted?: boolean;
+  updatedAt?: any;
 };
 
 function toDate(raw: any): Date {
   if (!raw) return new Date();
   if (typeof raw?.toDate === "function") return raw.toDate();
   return new Date(raw);
+}
+
+function toMillis(raw: any): number {
+  if (!raw) return 0;
+  const d = toDate(raw);
+  const t = d.getTime();
+  return Number.isFinite(t) ? t : 0;
 }
 
 export default function MatchDetailScreen() {
@@ -61,6 +69,9 @@ export default function MatchDetailScreen() {
   const [rsvps, setRsvps] = useState<Rsvp[]>([]);
   const [userStatus, setUserStatus] = useState<RsvpStatus | null>(null);
   const [loadingMatch, setLoadingMatch] = useState(true);
+
+  const promotionInFlightRef = useRef(false);
+  const prevWaitlistedRef = useRef<boolean | null>(null);
 
   // Live subscribe: match + RSVPs
   useEffect(() => {
@@ -98,6 +109,7 @@ export default function MatchDetailScreen() {
             playerName: data.playerName,
             status: data.status as RsvpStatus,
             isWaitlisted: data.isWaitlisted ?? false,
+            updatedAt: data.updatedAt,
           };
         });
 
@@ -106,6 +118,17 @@ export default function MatchDetailScreen() {
         if (user?.uid) {
           const mine = list.find((r) => r.userId === user.uid);
           setUserStatus((mine?.status as RsvpStatus | undefined) ?? null);
+
+          const nowWaitlisted =
+            (mine?.status === "yes" && (mine?.isWaitlisted ?? false)) ?? false;
+
+          // Promotion toast/alert (only after initial load)
+          if (prevWaitlistedRef.current !== null) {
+            if (prevWaitlistedRef.current === true && nowWaitlisted === false && mine?.status === "yes") {
+              Alert.alert("You’re in!", "A spot opened up — you’re now confirmed.");
+            }
+          }
+          prevWaitlistedRef.current = nowWaitlisted;
         }
       },
       (err) => console.error("RSVP listener error", err)
@@ -151,6 +174,69 @@ export default function MatchDetailScreen() {
     }
   };
 
+  /**
+   * Auto-promote earliest waitlisted YES into confirmed if a spot exists.
+   * NOTE: This is a client-side best-effort implementation. For perfect behavior under
+   * concurrency, move this logic to a Cloud Function later.
+   */
+  const autoPromoteWaitlistIfNeeded = async (maxPlayers: number) => {
+    if (!matchId) return;
+    if (promotionInFlightRef.current) return;
+
+    const status = ((match?.status ?? "scheduled") as string).toLowerCase();
+    if (status === "played" || status === "cancelled" || status === "canceled") return;
+
+    // No capacity => no waitlist => nothing to promote
+    if (!Number.isFinite(maxPlayers) || maxPlayers <= 0) return;
+
+    try {
+      promotionInFlightRef.current = true;
+
+      const rsvpsCol = collection(db, "rsvps");
+
+      // Current confirmed YES count (server-truth)
+      const confirmedQuery = query(
+        rsvpsCol,
+        where("matchId", "==", String(matchId)),
+        where("status", "==", "yes"),
+        where("isWaitlisted", "==", false)
+      );
+      const confirmedSnap = await getDocs(confirmedQuery);
+      const openSlots = maxPlayers - confirmedSnap.size;
+
+      if (openSlots <= 0) return;
+
+      // Get all waitlisted YES, then sort client-side by updatedAt (earliest first)
+      const waitlistQuery = query(
+        rsvpsCol,
+        where("matchId", "==", String(matchId)),
+        where("status", "==", "yes"),
+        where("isWaitlisted", "==", true)
+      );
+      const waitlistSnap = await getDocs(waitlistQuery);
+
+      if (waitlistSnap.empty) return;
+
+      const waitlistedDocs = waitlistSnap.docs
+        .map((d) => ({ id: d.id, ref: d.ref, data: d.data() as any }))
+        .sort((a, b) => toMillis(a.data.updatedAt) - toMillis(b.data.updatedAt));
+
+      const promoteCount = Math.min(openSlots, waitlistedDocs.length);
+
+      for (let i = 0; i < promoteCount; i++) {
+        const target = waitlistedDocs[i];
+        await updateDoc(target.ref, {
+          isWaitlisted: false,
+          updatedAt: new Date(),
+        });
+      }
+    } catch (e) {
+      console.error("Auto-promotion error", e);
+    } finally {
+      promotionInFlightRef.current = false;
+    }
+  };
+
   const handleRsvp = async (status: RsvpStatus) => {
     if (!user) return;
 
@@ -168,7 +254,7 @@ export default function MatchDetailScreen() {
 
       // Status-based blocking (cancelled / played)
       const matchStatus = (matchData.status ?? "scheduled").toLowerCase();
-      if (matchStatus === "cancelled") {
+      if (matchStatus === "cancelled" || matchStatus === "canceled") {
         Alert.alert(
           "Match cancelled",
           "You can’t change RSVP for a cancelled match."
@@ -250,6 +336,10 @@ export default function MatchDetailScreen() {
       );
 
       setUserStatus(status);
+
+      // NEW: after any RSVP update, try to promote from waitlist if a spot opened,
+      // then recompute counts.
+      await autoPromoteWaitlistIfNeeded(maxPlayers);
       await recomputeYesCount();
 
       if (status === "yes" && isWaitlisted) {
@@ -264,12 +354,30 @@ export default function MatchDetailScreen() {
     }
   };
 
+  // If host changes maxPlayers in Edit screen while this is open, we can also promote automatically.
+  // This keeps things consistent without needing the host to do anything else.
+  useEffect(() => {
+    const maxPlayers = match?.maxPlayers ?? 0;
+    if (!matchId) return;
+    if (!Number.isFinite(maxPlayers) || maxPlayers <= 0) return;
+
+    const going = rsvps.filter((r) => r.status === "yes" && !r.isWaitlisted);
+    const waitlist = rsvps.filter((r) => r.status === "yes" && r.isWaitlisted);
+
+    if (waitlist.length > 0 && going.length < maxPlayers) {
+      autoPromoteWaitlistIfNeeded(maxPlayers).then(() => recomputeYesCount());
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [match?.maxPlayers, rsvps.length]);
+
   // Host controls (status updates)
   const isHost = useMemo(() => {
     return !!user?.uid && !!match?.createdBy && match.createdBy === user.uid;
   }, [user?.uid, match?.createdBy]);
 
-  const setMatchStatus = async (nextStatus: "scheduled" | "played" | "cancelled") => {
+  const setMatchStatus = async (
+    nextStatus: "scheduled" | "played" | "cancelled"
+  ) => {
     if (!matchId) return;
 
     try {
@@ -282,7 +390,8 @@ export default function MatchDetailScreen() {
   };
 
   const confirmStatusChange = (nextStatus: "played" | "cancelled") => {
-    const label = nextStatus === "played" ? "mark this match as played" : "cancel this match";
+    const label =
+      nextStatus === "played" ? "mark this match as played" : "cancel this match";
     Alert.alert("Confirm", `Are you sure you want to ${label}?`, [
       { text: "No", style: "cancel" },
       { text: "Yes", style: "destructive", onPress: () => setMatchStatus(nextStatus) },
@@ -307,7 +416,11 @@ export default function MatchDetailScreen() {
 
   const statusLabel = ((match.status ?? "scheduled") as string).toLowerCase();
   const statusText =
-    statusLabel === "played" ? "Played" : statusLabel === "cancelled" ? "Cancelled" : "Scheduled";
+    statusLabel === "played"
+      ? "Played"
+      : statusLabel === "cancelled" || statusLabel === "canceled"
+      ? "Cancelled"
+      : "Scheduled";
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
@@ -316,7 +429,9 @@ export default function MatchDetailScreen() {
         {date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
       </Text>
 
-      {!!match.locationText && <Text style={styles.location}>{match.locationText}</Text>}
+      {!!match.locationText && (
+        <Text style={styles.location}>{match.locationText}</Text>
+      )}
 
       <View style={{ marginTop: 10 }}>
         <Text style={styles.statusPill}>Status: {statusText}</Text>
