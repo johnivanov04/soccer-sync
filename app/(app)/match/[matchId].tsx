@@ -11,7 +11,7 @@ import {
   updateDoc,
   where,
 } from "firebase/firestore";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Button,
@@ -26,6 +26,18 @@ import { db } from "../../../src/firebaseConfig";
 const RSVP_STATUSES = ["yes", "maybe", "no"] as const;
 type RsvpStatus = (typeof RSVP_STATUSES)[number];
 
+type MatchStatus = "scheduled" | "played" | "cancelled" | string;
+
+type Match = {
+  id: string;
+  startDateTime?: any;
+  locationText?: string;
+  maxPlayers?: number;
+  status?: MatchStatus;
+  createdBy?: string;
+  rsvpDeadline?: any;
+};
+
 type Rsvp = {
   id: string;
   userId?: string;
@@ -34,64 +46,75 @@ type Rsvp = {
   isWaitlisted?: boolean;
 };
 
+function toDate(raw: any): Date {
+  if (!raw) return new Date();
+  if (typeof raw?.toDate === "function") return raw.toDate();
+  return new Date(raw);
+}
+
 export default function MatchDetailScreen() {
   const { matchId } = useLocalSearchParams();
   const { user } = useAuth();
   const router = useRouter();
 
-  const [match, setMatch] = useState<any | null>(null);
+  const [match, setMatch] = useState<Match | null>(null);
   const [rsvps, setRsvps] = useState<Rsvp[]>([]);
   const [userStatus, setUserStatus] = useState<RsvpStatus | null>(null);
   const [loadingMatch, setLoadingMatch] = useState(true);
 
-  // Load match + live RSVPs
+  // Live subscribe: match + RSVPs
   useEffect(() => {
     if (!matchId) return;
 
     const matchRef = doc(db, "matches", String(matchId));
-
-    const loadMatch = async () => {
-      try {
-        const snap = await getDoc(matchRef);
+    const unsubMatch = onSnapshot(
+      matchRef,
+      (snap) => {
         if (snap.exists()) {
-          setMatch({ id: snap.id, ...snap.data() });
+          setMatch({ id: snap.id, ...(snap.data() as any) });
         } else {
           setMatch(null);
         }
-      } catch (err) {
-        console.error("Error loading match", err);
+        setLoadingMatch(false);
+      },
+      (err) => {
+        console.error("Error listening to match", err);
         setMatch(null);
-      } finally {
         setLoadingMatch(false);
       }
-    };
-
-    loadMatch();
+    );
 
     const rsvpsCol = collection(db, "rsvps");
     const q = query(rsvpsCol, where("matchId", "==", String(matchId)));
 
-    const unsub = onSnapshot(q, (snapshot) => {
-      const list: Rsvp[] = snapshot.docs.map((d) => {
-        const data = d.data() as any;
-        return {
-          id: d.id,
-          userId: data.userId,
-          playerName: data.playerName,
-          status: data.status as RsvpStatus,
-          isWaitlisted: data.isWaitlisted ?? false,
-        };
-      });
+    const unsubRsvps = onSnapshot(
+      q,
+      (snapshot) => {
+        const list: Rsvp[] = snapshot.docs.map((d) => {
+          const data = d.data() as any;
+          return {
+            id: d.id,
+            userId: data.userId,
+            playerName: data.playerName,
+            status: data.status as RsvpStatus,
+            isWaitlisted: data.isWaitlisted ?? false,
+          };
+        });
 
-      setRsvps(list);
+        setRsvps(list);
 
-      if (user?.uid) {
-        const mine = list.find((r) => r.userId === user.uid);
-        setUserStatus((mine?.status as RsvpStatus | undefined) ?? null);
-      }
-    });
+        if (user?.uid) {
+          const mine = list.find((r) => r.userId === user.uid);
+          setUserStatus((mine?.status as RsvpStatus | undefined) ?? null);
+        }
+      },
+      (err) => console.error("RSVP listener error", err)
+    );
 
-    return () => unsub();
+    return () => {
+      unsubMatch();
+      unsubRsvps();
+    };
   }, [matchId, user?.uid]);
 
   // Recompute confirmed / waitlist counts on the match doc
@@ -144,9 +167,12 @@ export default function MatchDetailScreen() {
       const maxPlayers: number = matchData.maxPlayers ?? 0;
 
       // Status-based blocking (cancelled / played)
-      const matchStatus = matchData.status ?? "scheduled";
+      const matchStatus = (matchData.status ?? "scheduled").toLowerCase();
       if (matchStatus === "cancelled") {
-        Alert.alert("Match cancelled", "You can’t change RSVP for a cancelled match.");
+        Alert.alert(
+          "Match cancelled",
+          "You can’t change RSVP for a cancelled match."
+        );
         return;
       }
       if (matchStatus === "played") {
@@ -154,10 +180,10 @@ export default function MatchDetailScreen() {
         return;
       }
 
-      // Deadline-based blocking (UI guard; we also do logic inside stats)
+      // Deadline-based blocking
       if (matchData.rsvpDeadline) {
         const deadline =
-          typeof matchData.rsvpDeadline.toDate === "function"
+          typeof matchData.rsvpDeadline?.toDate === "function"
             ? matchData.rsvpDeadline.toDate()
             : new Date(matchData.rsvpDeadline);
 
@@ -177,18 +203,21 @@ export default function MatchDetailScreen() {
       let isWaitlisted = false;
 
       if (status === "yes") {
-        const rsvpsCol = collection(db, "rsvps");
-        const confirmedQuery = query(
-          rsvpsCol,
-          where("matchId", "==", String(matchId)),
-          where("status", "==", "yes"),
-          where("isWaitlisted", "==", false)
-        );
-        const confirmedSnap = await getDocs(confirmedQuery);
-        const confirmedCount = confirmedSnap.size;
+        // Only waitlist if maxPlayers is a real capacity (> 0)
+        if (maxPlayers > 0) {
+          const rsvpsCol = collection(db, "rsvps");
+          const confirmedQuery = query(
+            rsvpsCol,
+            where("matchId", "==", String(matchId)),
+            where("status", "==", "yes"),
+            where("isWaitlisted", "==", false)
+          );
+          const confirmedSnap = await getDocs(confirmedQuery);
+          const confirmedCount = confirmedSnap.size;
 
-        if (confirmedCount >= maxPlayers) {
-          isWaitlisted = true;
+          if (confirmedCount >= maxPlayers) {
+            isWaitlisted = true;
+          }
         }
       }
 
@@ -235,6 +264,31 @@ export default function MatchDetailScreen() {
     }
   };
 
+  // Host controls (status updates)
+  const isHost = useMemo(() => {
+    return !!user?.uid && !!match?.createdBy && match.createdBy === user.uid;
+  }, [user?.uid, match?.createdBy]);
+
+  const setMatchStatus = async (nextStatus: "scheduled" | "played" | "cancelled") => {
+    if (!matchId) return;
+
+    try {
+      const matchRef = doc(db, "matches", String(matchId));
+      await updateDoc(matchRef, { status: nextStatus, updatedAt: new Date() });
+    } catch (e) {
+      console.error("Error updating match status", e);
+      Alert.alert("Error", "Could not update match status.");
+    }
+  };
+
+  const confirmStatusChange = (nextStatus: "played" | "cancelled") => {
+    const label = nextStatus === "played" ? "mark this match as played" : "cancel this match";
+    Alert.alert("Confirm", `Are you sure you want to ${label}?`, [
+      { text: "No", style: "cancel" },
+      { text: "Yes", style: "destructive", onPress: () => setMatchStatus(nextStatus) },
+    ]);
+  };
+
   if (loadingMatch || !match) {
     return (
       <View style={styles.container}>
@@ -243,8 +297,7 @@ export default function MatchDetailScreen() {
     );
   }
 
-  const date =
-    match.startDateTime?.toDate?.() || new Date(match.startDateTime);
+  const date = toDate(match.startDateTime);
 
   const going = rsvps.filter((r) => r.status === "yes" && !r.isWaitlisted);
   const waitlist = rsvps.filter((r) => r.status === "yes" && r.isWaitlisted);
@@ -252,16 +305,26 @@ export default function MatchDetailScreen() {
   const myRsvp = rsvps.find((r) => r.userId === user?.uid);
   const userWaitlisted = myRsvp?.isWaitlisted ?? false;
 
+  const statusLabel = ((match.status ?? "scheduled") as string).toLowerCase();
+  const statusText =
+    statusLabel === "played" ? "Played" : statusLabel === "cancelled" ? "Cancelled" : "Scheduled";
+
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.title}>
         {date.toLocaleDateString()}{" "}
         {date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
       </Text>
-      <Text style={styles.location}>{match.locationText}</Text>
+
+      {!!match.locationText && <Text style={styles.location}>{match.locationText}</Text>}
+
+      <View style={{ marginTop: 10 }}>
+        <Text style={styles.statusPill}>Status: {statusText}</Text>
+      </View>
 
       <Text style={{ marginTop: 12 }}>
-        {going.length}/{match.maxPlayers} going
+        {going.length}/{match.maxPlayers ?? "?"} going
+        {waitlist.length > 0 ? ` • ${waitlist.length} waitlist` : ""}
       </Text>
 
       <Text style={styles.sectionTitle}>Your RSVP</Text>
@@ -299,6 +362,39 @@ export default function MatchDetailScreen() {
         </>
       )}
 
+      {isHost && (
+        <>
+          <Text style={styles.sectionTitle}>Host tools</Text>
+
+          <View style={{ marginTop: 8 }}>
+            <Button
+              title="Edit match details"
+              onPress={() =>
+                router.push({
+                  pathname: "/(app)/match/edit",
+                  params: { matchId: String(matchId) },
+                })
+              }
+            />
+          </View>
+
+          <View style={{ marginTop: 8 }}>
+            <Button
+              title="Mark as played"
+              onPress={() => confirmStatusChange("played")}
+            />
+          </View>
+
+          <View style={{ marginTop: 8 }}>
+            <Button
+              title="Cancel match"
+              color="#d11"
+              onPress={() => confirmStatusChange("cancelled")}
+            />
+          </View>
+        </>
+      )}
+
       <View style={{ height: 40 }} />
       <Button title="Back to matches" onPress={() => router.back()} />
     </ScrollView>
@@ -320,5 +416,14 @@ const styles = StyleSheet.create({
     textAlign: "center",
     color: "#555",
     fontSize: 13,
+  },
+  statusPill: {
+    alignSelf: "flex-start",
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: "#E6F4FF",
+    fontSize: 12,
+    fontWeight: "600",
   },
 });

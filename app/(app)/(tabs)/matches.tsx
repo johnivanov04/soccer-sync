@@ -3,7 +3,6 @@ import { useRouter } from "expo-router";
 import {
   collection,
   doc,
-  getDoc,
   onSnapshot,
   orderBy,
   query,
@@ -79,7 +78,8 @@ export default function MatchesScreen() {
 
   const [matches, setMatches] = useState<Match[]>([]);
 
-  // 1) Load current user's teamId (and maybe teamName if it exists on user doc)
+  // 1) LIVE subscribe to current user's teamId (and maybe teamName if it exists on user doc)
+  //    This fixes the “joined team but Matches still says not on a team” issue.
   useEffect(() => {
     if (!user?.uid) {
       setTeamId(null);
@@ -90,14 +90,20 @@ export default function MatchesScreen() {
 
     setTeamLoading(true);
 
-    const load = async () => {
-      try {
-        const userRef = doc(db, "users", user.uid);
-        const snap = await getDoc(userRef);
+    const userRef = doc(db, "users", user.uid);
 
+    const unsub = onSnapshot(
+      userRef,
+      (snap) => {
         if (snap.exists()) {
           const data = snap.data() as any;
-          setTeamId(data.teamId ?? null);
+
+          // Canonical: teamId
+          // Extra fallbacks just in case older code wrote a different key:
+          const nextTeamId =
+            data.teamId ?? data.teamCode ?? data.team ?? data.team_id ?? null;
+
+          setTeamId(nextTeamId ?? null);
 
           // keep this as a fallback (some older user docs still have it)
           setTeamName(data.teamName ?? null);
@@ -105,16 +111,18 @@ export default function MatchesScreen() {
           setTeamId(null);
           setTeamName(null);
         }
-      } catch (e) {
-        console.error("Error loading user team", e);
+
+        setTeamLoading(false);
+      },
+      (err) => {
+        console.error("Error listening to user team", err);
         setTeamId(null);
         setTeamName(null);
-      } finally {
         setTeamLoading(false);
       }
-    };
+    );
 
-    load();
+    return () => unsub();
   }, [user?.uid]);
 
   // 2) Always resolve team name from teams/{teamId} so the UI is consistent
