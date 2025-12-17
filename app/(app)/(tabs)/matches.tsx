@@ -3,7 +3,6 @@ import { useRouter } from "expo-router";
 import {
   collection,
   doc,
-  getDoc,
   onSnapshot,
   orderBy,
   query,
@@ -11,7 +10,6 @@ import {
 } from "firebase/firestore";
 import React, { useEffect, useState } from "react";
 import {
-  Alert,
   Button,
   FlatList,
   StyleSheet,
@@ -21,10 +19,6 @@ import {
 } from "react-native";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
-import {
-  sendRemotePushAndCheckReceipt,
-  testLocalNotification,
-} from "../../../src/utils/pushNotifications";
 
 type MatchStatus = "scheduled" | "played" | "cancelled" | string;
 
@@ -99,6 +93,7 @@ export default function MatchesScreen() {
   const [teamLoading, setTeamLoading] = useState(true);
   const [matches, setMatches] = useState<Match[]>([]);
 
+  // 1) Subscribe to current user's teamId
   useEffect(() => {
     if (!user?.uid) {
       setTeamId(null);
@@ -119,7 +114,7 @@ export default function MatchesScreen() {
             data.teamId ?? data.teamCode ?? data.team ?? data.team_id ?? null;
 
           setTeamId(nextTeamId ?? null);
-          setTeamName(data.teamName ?? null);
+          setTeamName(data.teamName ?? null); // fallback (older docs)
         } else {
           setTeamId(null);
           setTeamName(null);
@@ -137,6 +132,7 @@ export default function MatchesScreen() {
     return () => unsub();
   }, [user?.uid]);
 
+  // 2) Resolve team name from teams/{teamId}
   useEffect(() => {
     if (!teamId) {
       setTeamName(null);
@@ -163,6 +159,7 @@ export default function MatchesScreen() {
     return () => unsub();
   }, [teamId]);
 
+  // 3) Subscribe to matches for team
   useEffect(() => {
     if (!teamId) {
       setMatches([]);
@@ -192,59 +189,6 @@ export default function MatchesScreen() {
 
     return () => unsub();
   }, [teamId]);
-
-  const onTestRemotePush = async () => {
-    try {
-      if (!user?.uid) return Alert.alert("Not logged in");
-
-      const userRef = doc(db, "users", user.uid);
-      const snap = await getDoc(userRef);
-      const token = snap.exists() ? (snap.data() as any).expoPushToken : null;
-
-      if (!token) return Alert.alert("No expoPushToken found on your user doc.");
-
-      const { ticket, receipt } = await sendRemotePushAndCheckReceipt({
-        to: token,
-        title: "Remote push ✅",
-        body: "If you see this, Expo push end-to-end is working.",
-        data: { kind: "test", ts: Date.now() },
-        sound: "default",
-        receiptWaitMs: 3000,
-      });
-
-      if (!ticket) {
-        return Alert.alert("Sent?", "No ticket returned. Check console logs.");
-      }
-
-      if (ticket.status !== "ok") {
-        return Alert.alert(
-          "Expo ticket error",
-          `${ticket.message ?? "Unknown"}\n${JSON.stringify(ticket.details ?? {}, null, 2)}`
-        );
-      }
-
-      if (!receipt) {
-        return Alert.alert(
-          "Ticket OK",
-          "Expo accepted it, but receipt not ready yet. Check console or try again in ~10s."
-        );
-      }
-
-      if (receipt.status === "ok") {
-        return Alert.alert("Delivered ✅", "Check Lock Screen / Notification Center.");
-      }
-
-      // receipt.status === "error"
-      const code = receipt.details?.error ?? "UnknownError";
-      return Alert.alert(
-        "APNs/FCM delivery failed",
-        `${code}\n\n${receipt.message ?? ""}`
-      );
-    } catch (e: any) {
-      console.error(e);
-      Alert.alert("Failed", e?.message ?? "Unknown error");
-    }
-  };
 
   const renderItem = ({ item }: { item: Match }) => {
     const date = toDate(item.startDateTime);
@@ -322,9 +266,10 @@ export default function MatchesScreen() {
     <View style={styles.container}>
       <Text style={styles.teamTag}>Team: {teamName ?? teamId}</Text>
 
-      <Button title="Create Match" onPress={() => router.push("/(app)/match/create")} />
-      <Button title="Test Local (2s)" onPress={testLocalNotification} />
-      <Button title="Test Remote Push" onPress={onTestRemotePush} />
+      <Button
+        title="Create Match"
+        onPress={() => router.push("/(app)/match/create")}
+      />
 
       <FlatList
         data={matches}
