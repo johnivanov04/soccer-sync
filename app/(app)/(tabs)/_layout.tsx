@@ -2,6 +2,7 @@
 import { Tabs } from "expo-router";
 import React from "react";
 
+
 export default function AppTabsLayout() {
   return (
     <Tabs screenOptions={{ headerTitleAlign: "center" }}>

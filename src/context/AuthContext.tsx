@@ -7,24 +7,17 @@ import {
   updateProfile,
   User,
 } from "firebase/auth";
-import { doc, serverTimestamp, setDoc } from "firebase/firestore";
-import React, {
-  createContext,
-  useContext,
-  useEffect,
-  useState,
-} from "react";
+import { doc, serverTimestamp, setDoc, updateDoc } from "firebase/firestore";
+import React, { createContext, useContext, useEffect, useRef, useState } from "react";
+import { Platform } from "react-native";
 import { auth, db } from "../firebaseConfig";
+import { registerForPushNotificationsAsync } from "../utils/pushNotifications";
 
 interface AuthContextValue {
   user: User | null;
   initializing: boolean;
   signIn: (email: string, password: string) => Promise<void>;
-  signUp: (
-    email: string,
-    password: string,
-    displayName?: string
-  ) => Promise<void>;
+  signUp: (email: string, password: string, displayName?: string) => Promise<void>;
   signOut: () => Promise<void>;
 }
 
@@ -34,11 +27,55 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
   const [initializing, setInitializing] = useState(true);
 
+  // Avoid double-registering tokens if auth state flips quickly
+  const pushSetupDoneForUidRef = useRef<string | null>(null);
+
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (fbUser) => {
+    const unsub = onAuthStateChanged(auth, async (fbUser) => {
       setUser(fbUser);
       setInitializing(false);
+
+      // Reset guard on logout
+      if (!fbUser?.uid) {
+        pushSetupDoneForUidRef.current = null;
+        return;
+      }
+
+      // Only once per login session per uid
+      if (pushSetupDoneForUidRef.current === fbUser.uid) return;
+      pushSetupDoneForUidRef.current = fbUser.uid;
+
+      // Ensure /users/{uid} exists (helps for older accounts)
+      const userRef = doc(db, "users", fbUser.uid);
+      try {
+        await setDoc(
+          userRef,
+          {
+            email: fbUser.email ?? "",
+            ...(fbUser.displayName ? { displayName: fbUser.displayName } : {}),
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+      } catch (e) {
+        console.warn("Could not upsert user profile doc", e);
+      }
+
+      // Register push token + store it
+      try {
+        const expoPushToken = await registerForPushNotificationsAsync();
+        if (!expoPushToken) return;
+
+        await updateDoc(userRef, {
+          expoPushToken,
+          expoPushTokenPlatform: Platform.OS,
+          expoPushTokenUpdatedAt: serverTimestamp(),
+        });
+      } catch (e) {
+        console.warn("Push token registration/save failed", e);
+      }
     });
+
     return unsub;
   }, []);
 
@@ -46,11 +83,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     await signInWithEmailAndPassword(auth, email, password);
   };
 
-  const signUp = async (
-    email: string,
-    password: string,
-    displayName?: string
-  ) => {
+  const signUp = async (email: string, password: string, displayName?: string) => {
     // 1) Create the Auth user
     const cred = await createUserWithEmailAndPassword(auth, email, password);
     const fbUser = cred.user;
@@ -75,7 +108,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           ? { displayName: displayName.trim() }
           : {}),
         createdAt: serverTimestamp(),
-        // 👇 NO teamId here → new users start teamless
+        // No teamId here — new users start teamless
       },
       { merge: true }
     );
@@ -86,9 +119,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   return (
-    <AuthContext.Provider
-      value={{ user, initializing, signIn, signUp, signOut }}
-    >
+    <AuthContext.Provider value={{ user, initializing, signIn, signUp, signOut }}>
       {children}
     </AuthContext.Provider>
   );
@@ -96,8 +127,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
 export const useAuth = () => {
   const ctx = useContext(AuthContext);
-  if (!ctx) {
-    throw new Error("useAuth must be used within an AuthProvider");
-  }
+  if (!ctx) throw new Error("useAuth must be used within an AuthProvider");
   return ctx;
 };
