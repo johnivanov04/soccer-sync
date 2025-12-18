@@ -7,6 +7,7 @@ import {
   getDocs,
   onSnapshot,
   query,
+  serverTimestamp,
   setDoc,
   updateDoc,
   where,
@@ -16,10 +17,6 @@ import { Alert, Button, ScrollView, StyleSheet, Text, View } from "react-native"
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
 import { addMatchToCalendar } from "../../../src/utils/calendarExport";
-import {
-  notifyWaitlistPromotionLocal,
-  sendRemotePushMany,
-} from "../../../src/utils/pushNotifications";
 
 const RSVP_STATUSES = ["yes", "maybe", "no"] as const;
 type RsvpStatus = (typeof RSVP_STATUSES)[number];
@@ -51,17 +48,6 @@ function toDate(raw: any): Date {
   return new Date(raw);
 }
 
-function toMillis(raw: any): number {
-  if (!raw) return 0;
-  const d = toDate(raw);
-  const t = d.getTime();
-  return Number.isFinite(t) ? t : 0;
-}
-
-function uniqStrings(xs: string[]) {
-  return Array.from(new Set(xs.filter((x) => typeof x === "string" && x.trim()).map((x) => x.trim())));
-}
-
 export default function MatchDetailScreen() {
   const { matchId } = useLocalSearchParams();
   const { user } = useAuth();
@@ -73,54 +59,10 @@ export default function MatchDetailScreen() {
   const [loadingMatch, setLoadingMatch] = useState(true);
 
   const [exportingCalendar, setExportingCalendar] = useState(false);
+  const [savingRsvp, setSavingRsvp] = useState(false);
 
-  const promotionInFlightRef = useRef(false);
+  // Used only to show an in-app alert when *this device* observes promotion while already on the screen.
   const prevWaitlistedRef = useRef<boolean | null>(null);
-
-  const notifyPromotedUserRemote = async (promotedUserId: string) => {
-    try {
-      const userSnap = await getDoc(doc(db, "users", promotedUserId));
-      if (!userSnap.exists()) {
-        console.warn("Promoted user doc missing:", promotedUserId);
-        return;
-      }
-
-      const data = userSnap.data() as any;
-
-      // ✅ NEW: support multi-device tokens; fallback to legacy single token
-      const tokens = uniqStrings([
-        ...(Array.isArray(data?.expoPushTokens) ? data.expoPushTokens : []),
-        ...(data?.expoPushToken ? [data.expoPushToken] : []),
-      ]);
-
-      if (tokens.length === 0) {
-        console.warn("No expo push tokens for promoted user:", promotedUserId);
-        return;
-      }
-
-      const when = match?.startDateTime ? toDate(match.startDateTime) : null;
-      const whenText = when
-        ? `${when.toLocaleDateString()} ${when.toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-          })}`
-        : "your match";
-
-      const whereText = match?.locationText ? ` at ${match.locationText}` : "";
-
-      await sendRemotePushMany(
-        tokens.map((t) => ({
-          to: t,
-          title: "You’re in! ✅",
-          body: `A spot opened up — you’re now confirmed for ${whenText}${whereText}.`,
-          data: { kind: "promoted", matchId: String(matchId) },
-          sound: "default",
-        }))
-      );
-    } catch (e) {
-      console.warn("Failed to send remote push to promoted user", promotedUserId, e);
-    }
-  };
 
   // Live subscribe: match + RSVPs
   useEffect(() => {
@@ -130,11 +72,8 @@ export default function MatchDetailScreen() {
     const unsubMatch = onSnapshot(
       matchRef,
       (snap) => {
-        if (snap.exists()) {
-          setMatch({ id: snap.id, ...(snap.data() as any) });
-        } else {
-          setMatch(null);
-        }
+        if (snap.exists()) setMatch({ id: snap.id, ...(snap.data() as any) });
+        else setMatch(null);
         setLoadingMatch(false);
       },
       (err) => {
@@ -171,16 +110,14 @@ export default function MatchDetailScreen() {
           const nowWaitlisted =
             (mine?.status === "yes" && (mine?.isWaitlisted ?? false)) ?? false;
 
-          // Promotion toast/alert (only after initial load)
+          // If you were waitlisted and now you're confirmed while viewing the screen,
+          // show an in-app alert (Cloud Function will also send a push notification).
           if (prevWaitlistedRef.current !== null) {
-            if (
-              prevWaitlistedRef.current === true &&
-              nowWaitlisted === false &&
-              mine?.status === "yes"
-            ) {
-              notifyWaitlistPromotionLocal();
+            if (prevWaitlistedRef.current === true && nowWaitlisted === false && mine?.status === "yes") {
+              Alert.alert("You’re in! ✅", "A spot opened up — you’re now confirmed for the match.");
             }
           }
+
           prevWaitlistedRef.current = nowWaitlisted;
         }
       },
@@ -193,105 +130,36 @@ export default function MatchDetailScreen() {
     };
   }, [matchId, user?.uid]);
 
-  // Recompute confirmed / waitlist counts on the match doc
-  const recomputeYesCount = async () => {
-    try {
-      const rsvpsCol = collection(db, "rsvps");
+  const isHost = useMemo(() => {
+    return !!user?.uid && !!match?.createdBy && match.createdBy === user.uid;
+  }, [user?.uid, match?.createdBy]);
 
-      const confirmedQuery = query(
-        rsvpsCol,
-        where("matchId", "==", String(matchId)),
-        where("status", "==", "yes"),
-        where("isWaitlisted", "==", false)
-      );
+  const statusLabel = String(match?.status ?? "scheduled").toLowerCase();
+  const isCancelled = statusLabel === "cancelled" || statusLabel === "canceled";
+  const isPlayed = statusLabel === "played";
 
-      const waitlistQuery = query(
-        rsvpsCol,
-        where("matchId", "==", String(matchId)),
-        where("status", "==", "yes"),
-        where("isWaitlisted", "==", true)
-      );
+  const isRsvpClosed = useMemo(() => {
+    if (!match?.rsvpDeadline) return false;
+    const deadline = toDate(match.rsvpDeadline);
+    return new Date() > deadline;
+  }, [match?.rsvpDeadline]);
 
-      const [confirmedSnap, waitlistSnap] = await Promise.all([
-        getDocs(confirmedQuery),
-        getDocs(waitlistQuery),
-      ]);
-
-      const matchRef = doc(db, "matches", String(matchId));
-      await updateDoc(matchRef, {
-        confirmedYesCount: confirmedSnap.size,
-        waitlistCount: waitlistSnap.size,
-      });
-    } catch (err) {
-      console.error("Error recomputing YES count", err);
-    }
-  };
-
-  const autoPromoteWaitlistIfNeeded = async (maxPlayers: number) => {
-    if (!matchId) return;
-    if (promotionInFlightRef.current) return;
-
-    const status = ((match?.status ?? "scheduled") as string).toLowerCase();
-    if (status === "played" || status === "cancelled" || status === "canceled") return;
-
-    if (!Number.isFinite(maxPlayers) || maxPlayers <= 0) return;
-
-    try {
-      promotionInFlightRef.current = true;
-
-      const rsvpsCol = collection(db, "rsvps");
-
-      const confirmedQuery = query(
-        rsvpsCol,
-        where("matchId", "==", String(matchId)),
-        where("status", "==", "yes"),
-        where("isWaitlisted", "==", false)
-      );
-      const confirmedSnap = await getDocs(confirmedQuery);
-      const openSlots = maxPlayers - confirmedSnap.size;
-
-      if (openSlots <= 0) return;
-
-      const waitlistQuery = query(
-        rsvpsCol,
-        where("matchId", "==", String(matchId)),
-        where("status", "==", "yes"),
-        where("isWaitlisted", "==", true)
-      );
-      const waitlistSnap = await getDocs(waitlistQuery);
-
-      if (waitlistSnap.empty) return;
-
-      const waitlistedDocs = waitlistSnap.docs
-        .map((d) => ({ ref: d.ref, data: d.data() as any }))
-        .sort((a, b) => toMillis(a.data.updatedAt) - toMillis(b.data.updatedAt));
-
-      const promoteCount = Math.min(openSlots, waitlistedDocs.length);
-
-      for (let i = 0; i < promoteCount; i++) {
-        const promoted = waitlistedDocs[i];
-        const promotedUserId: string | undefined = promoted.data?.userId;
-
-        await updateDoc(promoted.ref, {
-          isWaitlisted: false,
-          updatedAt: new Date(),
-        });
-
-        if (promotedUserId) {
-          await notifyPromotedUserRemote(promotedUserId);
-        }
-      }
-    } catch (e) {
-      console.error("Auto-promotion error", e);
-    } finally {
-      promotionInFlightRef.current = false;
-    }
-  };
+  const rsvpDisabledReason =
+    isCancelled ? "Match cancelled" : isPlayed ? "Match already played" : isRsvpClosed ? "RSVP closed" : null;
 
   const handleRsvp = async (status: RsvpStatus) => {
-    if (!user) return;
+    if (!user || !matchId) return;
+
+    // Block changes if match closed/played/cancelled
+    if (rsvpDisabledReason) {
+      Alert.alert(rsvpDisabledReason);
+      return;
+    }
 
     try {
+      setSavingRsvp(true);
+
+      // Re-fetch match for up-to-date maxPlayers + status/deadline
       const matchRef = doc(db, "matches", String(matchId));
       const matchSnap = await getDoc(matchRef);
 
@@ -301,9 +169,9 @@ export default function MatchDetailScreen() {
       }
 
       const matchData = matchSnap.data() as any;
-      const maxPlayers: number = matchData.maxPlayers ?? 0;
+      const maxPlayers: number = Number(matchData.maxPlayers ?? 0);
 
-      const matchStatus = (matchData.status ?? "scheduled").toLowerCase();
+      const matchStatus = String(matchData.status ?? "scheduled").toLowerCase();
       if (matchStatus === "cancelled" || matchStatus === "canceled") {
         Alert.alert("Match cancelled", "You can’t change RSVP for a cancelled match.");
         return;
@@ -314,11 +182,7 @@ export default function MatchDetailScreen() {
       }
 
       if (matchData.rsvpDeadline) {
-        const deadline =
-          typeof matchData.rsvpDeadline?.toDate === "function"
-            ? matchData.rsvpDeadline.toDate()
-            : new Date(matchData.rsvpDeadline);
-
+        const deadline = toDate(matchData.rsvpDeadline);
         if (new Date() > deadline) {
           Alert.alert(
             "RSVP closed",
@@ -331,24 +195,25 @@ export default function MatchDetailScreen() {
       const rsvpId = `${matchId}_${user.uid}`;
       const rsvpRef = doc(db, "rsvps", rsvpId);
 
+      // Determine whether THIS RSVP should be waitlisted (client-side check).
+      // Promotion + push is handled by Cloud Function.
       let isWaitlisted = false;
 
-      if (status === "yes") {
-        if (maxPlayers > 0) {
-          const rsvpsCol = collection(db, "rsvps");
-          const confirmedQuery = query(
-            rsvpsCol,
-            where("matchId", "==", String(matchId)),
-            where("status", "==", "yes"),
-            where("isWaitlisted", "==", false)
-          );
-          const confirmedSnap = await getDocs(confirmedQuery);
-          if (confirmedSnap.size >= maxPlayers) {
-            isWaitlisted = true;
-          }
+      if (status === "yes" && maxPlayers > 0) {
+        const rsvpsCol = collection(db, "rsvps");
+        const confirmedQuery = query(
+          rsvpsCol,
+          where("matchId", "==", String(matchId)),
+          where("status", "==", "yes"),
+          where("isWaitlisted", "==", false)
+        );
+        const confirmedSnap = await getDocs(confirmedQuery);
+        if (confirmedSnap.size >= maxPlayers) {
+          isWaitlisted = true;
         }
       }
 
+      // Get display name (fallback)
       let playerName = user.email ?? user.uid;
       try {
         const userDocRef = doc(db, "users", user.uid);
@@ -369,15 +234,12 @@ export default function MatchDetailScreen() {
           playerName,
           status,
           isWaitlisted,
-          updatedAt: new Date(),
+          updatedAt: serverTimestamp(),
         },
         { merge: true }
       );
 
       setUserStatus(status);
-
-      await autoPromoteWaitlistIfNeeded(maxPlayers);
-      await recomputeYesCount();
 
       if (status === "yes" && isWaitlisted) {
         Alert.alert(
@@ -388,32 +250,16 @@ export default function MatchDetailScreen() {
     } catch (e) {
       console.error(e);
       Alert.alert("Error", "Could not update RSVP right now.");
+    } finally {
+      setSavingRsvp(false);
     }
   };
-
-  useEffect(() => {
-    const maxPlayers = match?.maxPlayers ?? 0;
-    if (!matchId) return;
-    if (!Number.isFinite(maxPlayers) || maxPlayers <= 0) return;
-
-    const going = rsvps.filter((r) => r.status === "yes" && !r.isWaitlisted);
-    const waitlist = rsvps.filter((r) => r.status === "yes" && r.isWaitlisted);
-
-    if (waitlist.length > 0 && going.length < maxPlayers) {
-      autoPromoteWaitlistIfNeeded(maxPlayers).then(() => recomputeYesCount());
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [match?.maxPlayers, rsvps.length]);
-
-  const isHost = useMemo(() => {
-    return !!user?.uid && !!match?.createdBy && match.createdBy === user.uid;
-  }, [user?.uid, match?.createdBy]);
 
   const setMatchStatus = async (nextStatus: "scheduled" | "played" | "cancelled") => {
     if (!matchId) return;
     try {
       const matchRef = doc(db, "matches", String(matchId));
-      await updateDoc(matchRef, { status: nextStatus, updatedAt: new Date() });
+      await updateDoc(matchRef, { status: nextStatus, updatedAt: serverTimestamp() });
     } catch (e) {
       console.error("Error updating match status", e);
       Alert.alert("Error", "Could not update match status.");
@@ -487,7 +333,6 @@ export default function MatchDetailScreen() {
   const myRsvp = rsvps.find((r) => r.userId === user?.uid);
   const userWaitlisted = myRsvp?.isWaitlisted ?? false;
 
-  const statusLabel = ((match.status ?? "scheduled") as string).toLowerCase();
   const statusText =
     statusLabel === "played"
       ? "Played"
@@ -513,6 +358,10 @@ export default function MatchDetailScreen() {
         {waitlist.length > 0 ? ` • ${waitlist.length} waitlist` : ""}
       </Text>
 
+      {rsvpDisabledReason && (
+        <Text style={{ marginTop: 8, color: "#a00" }}>{rsvpDisabledReason}</Text>
+      )}
+
       <View style={{ marginTop: 12, alignSelf: "flex-start" }}>
         <Button
           title={exportingCalendar ? "Opening calendar..." : "Add to Calendar"}
@@ -529,6 +378,7 @@ export default function MatchDetailScreen() {
             title={status.toUpperCase()}
             color={userStatus === status ? "#007AFF" : "#aaa"}
             onPress={() => handleRsvp(status)}
+            disabled={savingRsvp || !!rsvpDisabledReason}
           />
         ))}
       </View>
