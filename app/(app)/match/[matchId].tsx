@@ -16,6 +16,10 @@ import { Alert, Button, ScrollView, StyleSheet, Text, View } from "react-native"
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
 import { addMatchToCalendar } from "../../../src/utils/calendarExport";
+import {
+  notifyWaitlistPromotionLocal,
+  sendRemotePush,
+} from "../../../src/utils/pushNotifications";
 
 const RSVP_STATUSES = ["yes", "maybe", "no"] as const;
 type RsvpStatus = (typeof RSVP_STATUSES)[number];
@@ -68,6 +72,39 @@ export default function MatchDetailScreen() {
 
   const promotionInFlightRef = useRef(false);
   const prevWaitlistedRef = useRef<boolean | null>(null);
+
+  const notifyPromotedUserRemote = async (promotedUserId: string) => {
+    try {
+      // Pull the promoted user's Expo token
+      const userSnap = await getDoc(doc(db, "users", promotedUserId));
+      const token = userSnap.exists() ? (userSnap.data() as any).expoPushToken : null;
+
+      if (!token) {
+        console.warn("No expoPushToken for promoted user:", promotedUserId);
+        return;
+      }
+
+      const when = match?.startDateTime ? toDate(match.startDateTime) : null;
+      const whenText = when
+        ? `${when.toLocaleDateString()} ${when.toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          })}`
+        : "your match";
+
+      const whereText = match?.locationText ? ` at ${match.locationText}` : "";
+
+      await sendRemotePush({
+        to: token,
+        title: "You’re in! ✅",
+        body: `A spot opened up — you’re now confirmed for ${whenText}${whereText}.`,
+        data: { kind: "promoted", matchId: String(matchId) },
+        sound: "default",
+      });
+    } catch (e) {
+      console.warn("Failed to send remote push to promoted user", promotedUserId, e);
+    }
+  };
 
   // Live subscribe: match + RSVPs
   useEffect(() => {
@@ -125,7 +162,7 @@ export default function MatchDetailScreen() {
               nowWaitlisted === false &&
               mine?.status === "yes"
             ) {
-              Alert.alert("You’re in!", "A spot opened up — you’re now confirmed.");
+              notifyWaitlistPromotionLocal();
             }
           }
           prevWaitlistedRef.current = nowWaitlisted;
@@ -220,10 +257,19 @@ export default function MatchDetailScreen() {
       const promoteCount = Math.min(openSlots, waitlistedDocs.length);
 
       for (let i = 0; i < promoteCount; i++) {
-        await updateDoc(waitlistedDocs[i].ref, {
+        const promoted = waitlistedDocs[i];
+        const promotedUserId: string | undefined = promoted.data?.userId;
+
+        // Flip waitlist -> confirmed
+        await updateDoc(promoted.ref, {
           isWaitlisted: false,
           updatedAt: new Date(),
         });
+
+        // Send REAL remote push to the promoted user (best-effort)
+        if (promotedUserId) {
+          await notifyPromotedUserRemote(promotedUserId);
+        }
       }
     } catch (e) {
       console.error("Auto-promotion error", e);
