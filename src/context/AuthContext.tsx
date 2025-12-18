@@ -7,7 +7,12 @@ import {
   updateProfile,
   User,
 } from "firebase/auth";
-import { doc, serverTimestamp, setDoc, updateDoc } from "firebase/firestore";
+import {
+  arrayUnion,
+  doc,
+  serverTimestamp,
+  setDoc,
+} from "firebase/firestore";
 import React, { createContext, useContext, useEffect, useRef, useState } from "react";
 import { Platform } from "react-native";
 import { auth, db } from "../firebaseConfig";
@@ -45,8 +50,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       if (pushSetupDoneForUidRef.current === fbUser.uid) return;
       pushSetupDoneForUidRef.current = fbUser.uid;
 
-      // Ensure /users/{uid} exists (helps for older accounts)
       const userRef = doc(db, "users", fbUser.uid);
+
+      // Ensure /users/{uid} exists (helps for older accounts)
       try {
         await setDoc(
           userRef,
@@ -61,16 +67,24 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         console.warn("Could not upsert user profile doc", e);
       }
 
-      // Register push token + store it
+      // Register push token + store it (multi-device safe)
       try {
         const expoPushToken = await registerForPushNotificationsAsync();
         if (!expoPushToken) return;
 
-        await updateDoc(userRef, {
-          expoPushToken,
-          expoPushTokenPlatform: Platform.OS,
-          expoPushTokenUpdatedAt: serverTimestamp(),
-        });
+        // Store BOTH:
+        // - expoPushToken (latest token, for backwards compatibility)
+        // - expoPushTokens (array of all tokens ever seen for this user)
+        await setDoc(
+          userRef,
+          {
+            expoPushToken: expoPushToken,
+            expoPushTokens: arrayUnion(expoPushToken),
+            expoPushTokenPlatform: Platform.OS,
+            expoPushTokenUpdatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
       } catch (e) {
         console.warn("Push token registration/save failed", e);
       }

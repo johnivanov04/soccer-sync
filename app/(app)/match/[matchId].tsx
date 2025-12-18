@@ -18,7 +18,7 @@ import { db } from "../../../src/firebaseConfig";
 import { addMatchToCalendar } from "../../../src/utils/calendarExport";
 import {
   notifyWaitlistPromotionLocal,
-  sendRemotePush,
+  sendRemotePushMany,
 } from "../../../src/utils/pushNotifications";
 
 const RSVP_STATUSES = ["yes", "maybe", "no"] as const;
@@ -58,6 +58,10 @@ function toMillis(raw: any): number {
   return Number.isFinite(t) ? t : 0;
 }
 
+function uniqStrings(xs: string[]) {
+  return Array.from(new Set(xs.filter((x) => typeof x === "string" && x.trim()).map((x) => x.trim())));
+}
+
 export default function MatchDetailScreen() {
   const { matchId } = useLocalSearchParams();
   const { user } = useAuth();
@@ -75,12 +79,22 @@ export default function MatchDetailScreen() {
 
   const notifyPromotedUserRemote = async (promotedUserId: string) => {
     try {
-      // Pull the promoted user's Expo token
       const userSnap = await getDoc(doc(db, "users", promotedUserId));
-      const token = userSnap.exists() ? (userSnap.data() as any).expoPushToken : null;
+      if (!userSnap.exists()) {
+        console.warn("Promoted user doc missing:", promotedUserId);
+        return;
+      }
 
-      if (!token) {
-        console.warn("No expoPushToken for promoted user:", promotedUserId);
+      const data = userSnap.data() as any;
+
+      // ✅ NEW: support multi-device tokens; fallback to legacy single token
+      const tokens = uniqStrings([
+        ...(Array.isArray(data?.expoPushTokens) ? data.expoPushTokens : []),
+        ...(data?.expoPushToken ? [data.expoPushToken] : []),
+      ]);
+
+      if (tokens.length === 0) {
+        console.warn("No expo push tokens for promoted user:", promotedUserId);
         return;
       }
 
@@ -94,13 +108,15 @@ export default function MatchDetailScreen() {
 
       const whereText = match?.locationText ? ` at ${match.locationText}` : "";
 
-      await sendRemotePush({
-        to: token,
-        title: "You’re in! ✅",
-        body: `A spot opened up — you’re now confirmed for ${whenText}${whereText}.`,
-        data: { kind: "promoted", matchId: String(matchId) },
-        sound: "default",
-      });
+      await sendRemotePushMany(
+        tokens.map((t) => ({
+          to: t,
+          title: "You’re in! ✅",
+          body: `A spot opened up — you’re now confirmed for ${whenText}${whereText}.`,
+          data: { kind: "promoted", matchId: String(matchId) },
+          sound: "default",
+        }))
+      );
     } catch (e) {
       console.warn("Failed to send remote push to promoted user", promotedUserId, e);
     }
@@ -211,10 +227,6 @@ export default function MatchDetailScreen() {
     }
   };
 
-  /**
-   * Auto-promote earliest waitlisted YES into confirmed if a spot exists.
-   * NOTE: This is client-side best-effort. For perfect behavior under concurrency, use a Cloud Function later.
-   */
   const autoPromoteWaitlistIfNeeded = async (maxPlayers: number) => {
     if (!matchId) return;
     if (promotionInFlightRef.current) return;
@@ -260,13 +272,11 @@ export default function MatchDetailScreen() {
         const promoted = waitlistedDocs[i];
         const promotedUserId: string | undefined = promoted.data?.userId;
 
-        // Flip waitlist -> confirmed
         await updateDoc(promoted.ref, {
           isWaitlisted: false,
           updatedAt: new Date(),
         });
 
-        // Send REAL remote push to the promoted user (best-effort)
         if (promotedUserId) {
           await notifyPromotedUserRemote(promotedUserId);
         }
@@ -381,7 +391,6 @@ export default function MatchDetailScreen() {
     }
   };
 
-  // If host changes maxPlayers while this screen is open, promote if needed.
   useEffect(() => {
     const maxPlayers = match?.maxPlayers ?? 0;
     if (!matchId) return;
@@ -396,7 +405,6 @@ export default function MatchDetailScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [match?.maxPlayers, rsvps.length]);
 
-  // Host controls
   const isHost = useMemo(() => {
     return !!user?.uid && !!match?.createdBy && match.createdBy === user.uid;
   }, [user?.uid, match?.createdBy]);
@@ -420,7 +428,6 @@ export default function MatchDetailScreen() {
     ]);
   };
 
-  // ✅ expo-calendar implementation
   const handleAddToCalendar = async () => {
     if (!matchId || !match) return;
 
@@ -452,7 +459,6 @@ export default function MatchDetailScreen() {
         notes,
       });
 
-      // If user cancels the OS dialog, do nothing.
       if ((res.action || "").toLowerCase().includes("cancel")) return;
     } catch (e: any) {
       console.error("Calendar export error", e);
@@ -507,7 +513,6 @@ export default function MatchDetailScreen() {
         {waitlist.length > 0 ? ` • ${waitlist.length} waitlist` : ""}
       </Text>
 
-      {/* Calendar button */}
       <View style={{ marginTop: 12, alignSelf: "flex-start" }}>
         <Button
           title={exportingCalendar ? "Opening calendar..." : "Add to Calendar"}

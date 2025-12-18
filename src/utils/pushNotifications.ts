@@ -52,33 +52,57 @@ export type PushMessage = {
   sound?: "default" | null;
 };
 
+function normalizeTokens(tokens: unknown): string[] {
+  if (!Array.isArray(tokens)) return [];
+  const out: string[] = [];
+  for (const t of tokens) {
+    if (typeof t === "string" && t.trim()) out.push(t.trim());
+  }
+  // de-dupe
+  return Array.from(new Set(out));
+}
+
 export async function sendRemotePush(message: PushMessage) {
+  const [ticket] = await sendRemotePushMany([message]);
+  return ticket;
+}
+
+// ✅ Batch sender (more efficient, and helps avoid rate issues)
+export async function sendRemotePushMany(messages: PushMessage[]) {
+  const payload = messages.map((m) => ({
+    to: m.to,
+    title: m.title,
+    body: m.body,
+    sound: m.sound ?? "default",
+    data: m.data ?? {},
+  }));
+
   const res = await fetch("https://exp.host/--/api/v2/push/send", {
     method: "POST",
     headers: {
       Accept: "application/json",
-      "Accept-Encoding": "gzip, deflate",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      to: message.to,
-      title: message.title,
-      body: message.body,
-      sound: message.sound ?? "default",
-      data: message.data ?? {},
-    }),
+    body: JSON.stringify(payload),
   });
 
   const json = await res.json();
-  const ticket = json?.data;
-  if (!ticket) throw new Error(`No ticket returned: ${JSON.stringify(json)}`);
+  const tickets = json?.data;
 
-  const t = Array.isArray(ticket) ? ticket[0] : ticket;
-  if (t?.status !== "ok") {
-    throw new Error(
-      `Expo ticket error: ${t?.message ?? "Unknown"} ${JSON.stringify(t?.details ?? {})}`
-    );
+  if (!tickets) throw new Error(`No tickets returned: ${JSON.stringify(json)}`);
+  const arr = Array.isArray(tickets) ? tickets : [tickets];
+
+  // throw if any ticket is not ok (keeps behavior similar to your old sendRemotePush)
+  for (const t of arr) {
+    if (t?.status !== "ok") {
+      throw new Error(
+        `Expo ticket error: ${t?.message ?? "Unknown"} ${JSON.stringify(t?.details ?? {})}`
+      );
+    }
   }
 
-  return t;
+  return arr;
 }
+
+// Optional export if you ever want it elsewhere
+export { normalizeTokens };
