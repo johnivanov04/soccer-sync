@@ -28,6 +28,12 @@ export default function AppTabsLayout() {
         }}
       />
       <Tabs.Screen
+        name="myRsvps"
+        options={{
+          title: "My RSVPs",
+        }}
+      />
+      <Tabs.Screen
         name="profile"
         options={{
           title: "Profile",
