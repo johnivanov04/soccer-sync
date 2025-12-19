@@ -2,10 +2,10 @@
 import { useRouter } from "expo-router";
 import {
     collection,
-    documentId,
+    doc,
     onSnapshot,
     query,
-    where
+    where,
 } from "firebase/firestore";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -90,19 +90,13 @@ function getMyChip(r: MyRsvp) {
   return { label: "No", variant: "no" as const };
 }
 
-function chunk<T>(arr: T[], size: number) {
-  const out: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-}
-
 export default function MyRsvpsScreen() {
   const router = useRouter();
   const { user } = useAuth();
 
   const [loading, setLoading] = useState(true);
   const [rsvps, setRsvps] = useState<MyRsvp[]>([]);
-  const [matchesById, setMatchesById] = useState<Record<string, Match>>({});
+  const [matchesById, setMatchesById] = useState<Record<string, Match | null>>({});
   const [errorText, setErrorText] = useState<string | null>(null);
 
   // 1) Subscribe to my RSVPs (by userId)
@@ -151,76 +145,104 @@ export default function MyRsvpsScreen() {
     return () => unsub();
   }, [user?.uid]);
 
+  // stable, sorted matchIds
   const matchIds = useMemo(() => {
     const uniq = new Set<string>();
     rsvps.forEach((r) => uniq.add(r.matchId));
-    return Array.from(uniq);
+    return Array.from(uniq).sort();
   }, [rsvps]);
 
-  // 2) Subscribe to the match docs for those RSVPs (chunked by 10)
-  const matchUnsubsRef = useRef<(() => void)[]>([]);
+  const matchIdsKey = useMemo(() => matchIds.join("|"), [matchIds]);
+
+  // 2) Subscribe to each match doc individually (avoids "in" query being denied by one bad id)
+  const matchUnsubsRef = useRef<Record<string, () => void>>({});
+
   useEffect(() => {
-    // cleanup old listeners
-    matchUnsubsRef.current.forEach((u) => u());
-    matchUnsubsRef.current = [];
+    // stop any previous listeners
+    Object.values(matchUnsubsRef.current).forEach((u) => u());
+    matchUnsubsRef.current = {};
 
     if (!matchIds.length) {
       setMatchesById({});
       return;
     }
 
-    const chunks = chunk(matchIds, 10);
+    // prune cache to only current ids
+    setMatchesById((prev) => {
+      const keep = new Set(matchIds);
+      const next: Record<string, Match | null> = {};
+      for (const [k, v] of Object.entries(prev)) {
+        if (keep.has(k)) next[k] = v;
+      }
+      return next;
+    });
 
-    chunks.forEach((ids) => {
-      const mq = query(collection(db, "matches"), where(documentId(), "in", ids));
+    // start listeners
+    matchIds.forEach((id) => {
+      const matchRef = doc(db, "matches", id);
+
       const unsub = onSnapshot(
-        mq,
+        matchRef,
         (snap) => {
           setMatchesById((prev) => {
             const next = { ...prev };
-            snap.docs.forEach((d) => {
-              next[d.id] = { id: d.id, ...(d.data() as any) };
-            });
+            if (snap.exists()) next[id] = { id: snap.id, ...(snap.data() as any) };
+            else next[id] = null; // deleted / missing
             return next;
           });
         },
         (err) => {
-          console.error("My RSVPs match listener error", err);
+          // If this specific match is not readable, don't kill the whole screen
+          console.error("My RSVPs match doc listener error", id, err);
+          setMatchesById((prev) => ({ ...prev, [id]: null }));
         }
       );
 
-      matchUnsubsRef.current.push(unsub);
+      matchUnsubsRef.current[id] = unsub;
     });
 
     return () => {
-      matchUnsubsRef.current.forEach((u) => u());
-      matchUnsubsRef.current = [];
+      Object.values(matchUnsubsRef.current).forEach((u) => u());
+      matchUnsubsRef.current = {};
     };
-  }, [matchIds.join("|")]);
+  }, [matchIdsKey]);
 
-  const rows = useMemo(() => {
+  const sections = useMemo(() => {
+    const now = Date.now();
+
     const merged = rsvps.map((r) => {
       const match = matchesById[r.matchId] ?? null;
-      const start = match ? toDate(match.startDateTime).getTime() : 0;
-      const matchStatus = normalizeStatus(match?.status);
-      const isPast =
-        matchStatus === "played" ||
-        matchStatus === "cancelled" ||
-        matchStatus === "canceled" ||
-        (match ? start < Date.now() : false);
 
-      return { rsvp: r, match, start, isPast };
+      const startMs = match?.startDateTime ? toDate(match.startDateTime).getTime() : Number.POSITIVE_INFINITY;
+      const matchStatus = normalizeStatus(match?.status);
+
+      const isUnavailable = !match;
+      const isPast =
+        !isUnavailable &&
+        (matchStatus === "played" ||
+          matchStatus === "cancelled" ||
+          matchStatus === "canceled" ||
+          startMs < now);
+
+      return { rsvp: r, match, startMs, isPast, isUnavailable };
     });
 
-    // sort upcoming first by start time, then past
-    merged.sort((a, b) => a.start - b.start);
+    const upcoming = merged
+      .filter((x) => !x.isUnavailable && !x.isPast)
+      .sort((a, b) => a.startMs - b.startMs);
 
-    const upcoming = merged.filter((x) => !x.isPast);
-    const past = merged.filter((x) => x.isPast).reverse(); // most recent past first
+    const past = merged
+      .filter((x) => !x.isUnavailable && x.isPast)
+      .sort((a, b) => b.startMs - a.startMs);
+
+    const unavailable = merged
+      .filter((x) => x.isUnavailable)
+      .sort((a, b) => a.rsvp.matchId.localeCompare(b.rsvp.matchId));
 
     return [
       { title: "Upcoming", data: upcoming },
       { title: "Past", data: past },
+      { title: "Unavailable", data: unavailable },
     ].filter((s) => s.data.length > 0);
   }, [rsvps, matchesById]);
 
@@ -249,9 +271,6 @@ export default function MyRsvpsScreen() {
       <View style={styles.container}>
         <Text style={styles.title}>My RSVPs</Text>
         <Text style={{ marginTop: 12, color: "#a00" }}>{errorText}</Text>
-        <Text style={{ marginTop: 8, color: "#555" }}>
-          If this keeps happening, it’s almost always Firestore rules for /rsvps reads.
-        </Text>
       </View>
     );
   }
@@ -272,7 +291,7 @@ export default function MyRsvpsScreen() {
       <Text style={styles.title}>My RSVPs</Text>
 
       <SectionList
-        sections={rows}
+        sections={sections}
         keyExtractor={(item) => item.rsvp.id}
         contentContainerStyle={{ paddingVertical: 12 }}
         renderSectionHeader={({ section }) => (
@@ -283,16 +302,19 @@ export default function MyRsvpsScreen() {
           const myChip = getMyChip(rsvp);
           const matchChip = getMatchChip(match);
 
-          const date = match ? toDate(match.startDateTime) : null;
+          const date = match?.startDateTime ? toDate(match.startDateTime) : null;
           const confirmed = match?.confirmedYesCount ?? 0;
           const max = match?.maxPlayers ?? 0;
           const waitlist = match?.waitlistCount ?? 0;
 
           const isHost = !!match?.createdBy && match.createdBy === user.uid;
 
+          const canOpen = !!match;
+
           return (
             <TouchableOpacity
-              style={styles.card}
+              style={[styles.card, !canOpen && { opacity: 0.6 }]}
+              disabled={!canOpen}
               onPress={() =>
                 router.push({
                   pathname: "/(app)/match/[matchId]",
@@ -310,7 +332,7 @@ export default function MyRsvpsScreen() {
                     : "Match unavailable"}
                 </Text>
 
-                <View style={[styles.chip, styles[`chip_${matchChip.variant}`]]}>
+                <View style={[styles.chip, (styles as any)[`chip_${matchChip.variant}`]]}>
                   <Text style={styles.chipText}>{matchChip.label}</Text>
                 </View>
               </View>
@@ -321,23 +343,33 @@ export default function MyRsvpsScreen() {
                 </Text>
               )}
 
+              {!!match?.description?.trim() && (
+                <Text style={styles.description} numberOfLines={2}>
+                  {match.description.trim()}
+                </Text>
+              )}
+
               <View style={styles.metaRow}>
-                <View style={[styles.chip, styles[`chip_${myChip.variant}`]]}>
+                <View style={[styles.chip, (styles as any)[`chip_${myChip.variant}`]]}>
                   <Text style={styles.chipText}>
                     {myChip.label}
                     {myChip.variant === "confirmed" ? " ✅" : ""}
                   </Text>
                 </View>
 
-                <Text style={styles.subtitle}>
-                  {confirmed}/{max || "?"} going
-                </Text>
+                {!!match && (
+                  <>
+                    <Text style={styles.subtitle}>
+                      {confirmed}/{max || "?"} going
+                    </Text>
 
-                {waitlist > 0 && (
-                  <Text style={styles.waitlistText}>⏳ {waitlist} waitlist</Text>
+                    {waitlist > 0 && (
+                      <Text style={styles.waitlistText}>⏳ {waitlist} waitlist</Text>
+                    )}
+
+                    {isHost && <Text style={styles.hostBadge}>👑 Host</Text>}
+                  </>
                 )}
-
-                {isHost && <Text style={styles.hostBadge}>👑 Host</Text>}
               </View>
             </TouchableOpacity>
           );
@@ -376,6 +408,7 @@ const styles = StyleSheet.create({
 
   cardTitle: { fontWeight: "bold", flex: 1 },
   location: { marginTop: 6, color: "#555" },
+  description: { marginTop: 4, color: "#666" },
 
   metaRow: {
     flexDirection: "row",
