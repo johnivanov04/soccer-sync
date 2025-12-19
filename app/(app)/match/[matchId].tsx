@@ -4,7 +4,6 @@ import {
   collection,
   doc,
   getDoc,
-  getDocs,
   onSnapshot,
   query,
   serverTimestamp,
@@ -31,6 +30,10 @@ type Match = {
   status?: MatchStatus;
   createdBy?: string;
   rsvpDeadline?: any;
+
+  // ✅ maintained by Cloud Function
+  confirmedYesCount?: number;
+  waitlistCount?: number;
 };
 
 type Rsvp = {
@@ -48,8 +51,16 @@ function toDate(raw: any): Date {
   return new Date(raw);
 }
 
+function paramToString(v: any): string | null {
+  if (!v) return null;
+  if (Array.isArray(v)) return v[0] ? String(v[0]) : null;
+  return String(v);
+}
+
 export default function MatchDetailScreen() {
-  const { matchId } = useLocalSearchParams();
+  const params = useLocalSearchParams();
+  const matchIdStr = paramToString(params?.matchId);
+
   const { user } = useAuth();
   const router = useRouter();
 
@@ -61,14 +72,14 @@ export default function MatchDetailScreen() {
   const [exportingCalendar, setExportingCalendar] = useState(false);
   const [savingRsvp, setSavingRsvp] = useState(false);
 
-  // Used only to show an in-app alert when *this device* observes promotion while already on the screen.
+  // only for on-screen "you got promoted" alert
   const prevWaitlistedRef = useRef<boolean | null>(null);
 
   // Live subscribe: match + RSVPs
   useEffect(() => {
-    if (!matchId) return;
+    if (!matchIdStr) return;
 
-    const matchRef = doc(db, "matches", String(matchId));
+    const matchRef = doc(db, "matches", matchIdStr);
     const unsubMatch = onSnapshot(
       matchRef,
       (snap) => {
@@ -84,7 +95,7 @@ export default function MatchDetailScreen() {
     );
 
     const rsvpsCol = collection(db, "rsvps");
-    const q = query(rsvpsCol, where("matchId", "==", String(matchId)));
+    const q = query(rsvpsCol, where("matchId", "==", matchIdStr));
 
     const unsubRsvps = onSnapshot(
       q,
@@ -110,11 +121,16 @@ export default function MatchDetailScreen() {
           const nowWaitlisted =
             (mine?.status === "yes" && (mine?.isWaitlisted ?? false)) ?? false;
 
-          // If you were waitlisted and now you're confirmed while viewing the screen,
-          // show an in-app alert (Cloud Function will also send a push notification).
           if (prevWaitlistedRef.current !== null) {
-            if (prevWaitlistedRef.current === true && nowWaitlisted === false && mine?.status === "yes") {
-              Alert.alert("You’re in! ✅", "A spot opened up — you’re now confirmed for the match.");
+            if (
+              prevWaitlistedRef.current === true &&
+              nowWaitlisted === false &&
+              mine?.status === "yes"
+            ) {
+              Alert.alert(
+                "You’re in! ✅",
+                "A spot opened up — you’re now confirmed for the match."
+              );
             }
           }
 
@@ -128,7 +144,7 @@ export default function MatchDetailScreen() {
       unsubMatch();
       unsubRsvps();
     };
-  }, [matchId, user?.uid]);
+  }, [matchIdStr, user?.uid]);
 
   const isHost = useMemo(() => {
     return !!user?.uid && !!match?.createdBy && match.createdBy === user.uid;
@@ -145,23 +161,39 @@ export default function MatchDetailScreen() {
   }, [match?.rsvpDeadline]);
 
   const rsvpDisabledReason =
-    isCancelled ? "Match cancelled" : isPlayed ? "Match already played" : isRsvpClosed ? "RSVP closed" : null;
+    isCancelled
+      ? "Match cancelled"
+      : isPlayed
+      ? "Match already played"
+      : isRsvpClosed
+      ? "RSVP closed"
+      : null;
 
   const handleRsvp = async (status: RsvpStatus) => {
-    if (!user || !matchId) return;
+    if (!user || !matchIdStr) return;
 
-    // Block changes if match closed/played/cancelled
     if (rsvpDisabledReason) {
       Alert.alert(rsvpDisabledReason);
       return;
     }
 
+    const rsvpId = `${matchIdStr}_${user.uid}`;
+
+    console.log("RSVP DEBUG ids:", {
+      matchIdStr,
+      uid: user.uid,
+      rsvpId,
+      status,
+    });
+
     try {
       setSavingRsvp(true);
 
-      // Re-fetch match for up-to-date maxPlayers + status/deadline
-      const matchRef = doc(db, "matches", String(matchId));
+      // 1) Read match fresh (this will tell us if MATCH read is what's denied)
+      console.log("RSVP DEBUG: get match doc…");
+      const matchRef = doc(db, "matches", matchIdStr);
       const matchSnap = await getDoc(matchRef);
+      console.log("RSVP DEBUG: match read OK?", matchSnap.exists());
 
       if (!matchSnap.exists()) {
         Alert.alert("Match not found");
@@ -192,28 +224,17 @@ export default function MatchDetailScreen() {
         }
       }
 
-      const rsvpId = `${matchId}_${user.uid}`;
-      const rsvpRef = doc(db, "rsvps", rsvpId);
-
-      // Determine whether THIS RSVP should be waitlisted (client-side check).
-      // Promotion + push is handled by Cloud Function.
+      // 2) Determine waitlist WITHOUT extra reads (no getDoc(rsvpRef), no query)
       let isWaitlisted = false;
-
       if (status === "yes" && maxPlayers > 0) {
-        const rsvpsCol = collection(db, "rsvps");
-        const confirmedQuery = query(
-          rsvpsCol,
-          where("matchId", "==", String(matchId)),
-          where("status", "==", "yes"),
-          where("isWaitlisted", "==", false)
-        );
-        const confirmedSnap = await getDocs(confirmedQuery);
-        if (confirmedSnap.size >= maxPlayers) {
-          isWaitlisted = true;
-        }
+        const confirmedFromMatch = Number(matchData.confirmedYesCount);
+        const localConfirmed = rsvps.filter((r) => r.status === "yes" && !r.isWaitlisted).length;
+
+        const confirmed = Number.isFinite(confirmedFromMatch) ? confirmedFromMatch : localConfirmed;
+        isWaitlisted = confirmed >= maxPlayers;
       }
 
-      // Get display name (fallback)
+      // 3) Load displayName best-effort (this can fail safely)
       let playerName = user.email ?? user.uid;
       try {
         const userDocRef = doc(db, "users", user.uid);
@@ -226,18 +247,18 @@ export default function MatchDetailScreen() {
         console.warn("Could not load user profile for RSVP", innerErr);
       }
 
-      await setDoc(
-        rsvpRef,
-        {
-          matchId: String(matchId),
-          userId: user.uid,
-          playerName,
-          status,
-          isWaitlisted,
-          updatedAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
+      // 4) Write RSVP (OVERWRITE to avoid “extra field” rule failures)
+      console.log("RSVP DEBUG: setDoc (overwrite) …");
+      const rsvpRef = doc(db, "rsvps", rsvpId);
+      await setDoc(rsvpRef, {
+        matchId: matchIdStr,
+        userId: user.uid,
+        playerName,
+        status,
+        isWaitlisted,
+        updatedAt: serverTimestamp(),
+      });
+      console.log("RSVP DEBUG: setDoc OK");
 
       setUserStatus(status);
 
@@ -248,7 +269,7 @@ export default function MatchDetailScreen() {
         );
       }
     } catch (e) {
-      console.error(e);
+      console.error("RSVP DEBUG error:", e);
       Alert.alert("Error", "Could not update RSVP right now.");
     } finally {
       setSavingRsvp(false);
@@ -256,9 +277,9 @@ export default function MatchDetailScreen() {
   };
 
   const setMatchStatus = async (nextStatus: "scheduled" | "played" | "cancelled") => {
-    if (!matchId) return;
+    if (!matchIdStr) return;
     try {
-      const matchRef = doc(db, "matches", String(matchId));
+      const matchRef = doc(db, "matches", matchIdStr);
       await updateDoc(matchRef, { status: nextStatus, updatedAt: serverTimestamp() });
     } catch (e) {
       console.error("Error updating match status", e);
@@ -275,7 +296,7 @@ export default function MatchDetailScreen() {
   };
 
   const handleAddToCalendar = async () => {
-    if (!matchId || !match) return;
+    if (!matchIdStr || !match) return;
 
     try {
       setExportingCalendar(true);
@@ -291,13 +312,13 @@ export default function MatchDetailScreen() {
         "Pickup soccer match",
         match.locationText ? `Location: ${match.locationText}` : "",
         deadlineText,
-        `Match ID: ${String(matchId)}`,
+        `Match ID: ${String(matchIdStr)}`,
       ]
         .filter(Boolean)
         .join("\n");
 
       const res = await addMatchToCalendar({
-        id: String(matchId),
+        id: String(matchIdStr),
         title: "Pickup Soccer",
         startAt,
         endAt,
@@ -316,6 +337,14 @@ export default function MatchDetailScreen() {
       setExportingCalendar(false);
     }
   };
+
+  if (!matchIdStr) {
+    return (
+      <View style={styles.container}>
+        <Text>Missing match id.</Text>
+      </View>
+    );
+  }
 
   if (loadingMatch || !match) {
     return (
@@ -372,12 +401,12 @@ export default function MatchDetailScreen() {
 
       <Text style={styles.sectionTitle}>Your RSVP</Text>
       <View style={styles.rsvpRow}>
-        {RSVP_STATUSES.map((status) => (
+        {RSVP_STATUSES.map((s) => (
           <Button
-            key={status}
-            title={status.toUpperCase()}
-            color={userStatus === status ? "#007AFF" : "#aaa"}
-            onPress={() => handleRsvp(status)}
+            key={s}
+            title={s.toUpperCase()}
+            color={userStatus === s ? "#007AFF" : "#aaa"}
+            onPress={() => handleRsvp(s)}
             disabled={savingRsvp || !!rsvpDisabledReason}
           />
         ))}
@@ -416,7 +445,7 @@ export default function MatchDetailScreen() {
               onPress={() =>
                 router.push({
                   pathname: "/(app)/match/edit",
-                  params: { matchId: String(matchId) },
+                  params: { matchId: String(matchIdStr) },
                 })
               }
             />
