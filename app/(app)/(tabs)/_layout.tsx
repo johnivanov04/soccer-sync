@@ -2,7 +2,6 @@
 import { Tabs } from "expo-router";
 import React from "react";
 
-
 export default function AppTabsLayout() {
   return (
     <Tabs screenOptions={{ headerTitleAlign: "center" }}>
@@ -13,6 +12,7 @@ export default function AppTabsLayout() {
           tabBarLabel: "Matches",
         }}
       />
+
       <Tabs.Screen
         name="teams"
         options={{
@@ -20,6 +20,7 @@ export default function AppTabsLayout() {
           tabBarLabel: "Teams",
         }}
       />
+
       <Tabs.Screen
         name="stats"
         options={{
@@ -27,12 +28,15 @@ export default function AppTabsLayout() {
           tabBarLabel: "Fitness",
         }}
       />
+
       <Tabs.Screen
         name="myRsvps"
         options={{
           title: "My RSVPs",
+          tabBarLabel: "My RSVPs",
         }}
       />
+
       <Tabs.Screen
         name="profile"
         options={{
