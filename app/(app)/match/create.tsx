@@ -8,7 +8,7 @@ import {
   getDoc,
   serverTimestamp,
 } from "firebase/firestore";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Button,
@@ -25,12 +25,12 @@ export default function CreateMatchScreen() {
   const { user } = useAuth();
 
   // Form state
-  const [date, setDate] = useState(
-    new Date(Date.now() + 2 * 60 * 60 * 1000) // default = 2h from now
-  );
+  const [date, setDate] = useState(new Date(Date.now() + 2 * 60 * 60 * 1000)); // 2h from now
   const [showPicker, setShowPicker] = useState(false);
   const [locationText, setLocationText] = useState("");
   const [maxPlayers, setMaxPlayers] = useState("14");
+
+  // (You can keep this UI for now, but we won't write it to Firestore unless rules allow it)
   const [description, setDescription] = useState("");
 
   // Team state
@@ -38,7 +38,8 @@ export default function CreateMatchScreen() {
   const [teamName, setTeamName] = useState<string | null>(null);
   const [teamLoading, setTeamLoading] = useState(true);
 
-  // Load the current user's team
+  const displayTeam = useMemo(() => teamName || teamId, [teamName, teamId]);
+
   useEffect(() => {
     if (!user?.uid) {
       setTeamLoading(false);
@@ -55,7 +56,6 @@ export default function CreateMatchScreen() {
           const currentTeamId = data.teamId ?? null;
           setTeamId(currentTeamId);
 
-          // Prefer explicit teamName, otherwise fall back to teamId
           const name =
             (data.teamName as string | undefined) ??
             (currentTeamId as string | null);
@@ -76,6 +76,25 @@ export default function CreateMatchScreen() {
     loadUserProfile();
   }, [user?.uid]);
 
+  function computeRsvpDeadline(start: Date): Date {
+    const now = new Date();
+
+    // If match is >= 24h away => deadline = 24h before
+    // Else deadline = 30 minutes before start (so it doesn't instantly close)
+    const msUntilStart = start.getTime() - now.getTime();
+    const dayMs = 24 * 60 * 60 * 1000;
+    const min30Ms = 30 * 60 * 1000;
+
+    if (msUntilStart >= dayMs) {
+      return new Date(start.getTime() - dayMs);
+    }
+
+    // clamp: never after start, never wildly in the past
+    const d = new Date(start.getTime() - min30Ms);
+    if (d.getTime() < now.getTime()) return start; // RSVP open until kickoff for soon matches
+    return d;
+  }
+
   const handleCreate = async () => {
     if (!user?.uid) {
       Alert.alert("Please sign in again.");
@@ -95,9 +114,16 @@ export default function CreateMatchScreen() {
       return;
     }
 
-    const maxPlayersNum = Number(maxPlayers);
+    const maxPlayersNum = Math.floor(Number(maxPlayers));
     if (!Number.isFinite(maxPlayersNum) || maxPlayersNum <= 0) {
       Alert.alert("Max players must be a positive number.");
+      return;
+    }
+
+    // simple default; keep it consistent
+    const minPlayersNum = 8;
+    if (minPlayersNum > maxPlayersNum) {
+      Alert.alert("Min players cannot be greater than max players.");
       return;
     }
 
@@ -108,27 +134,33 @@ export default function CreateMatchScreen() {
     }
 
     try {
-      const rsvpDeadline = new Date(
-        date.getTime() - 24 * 60 * 60 * 1000 // 24h before
-      );
+      const rsvpDeadline = computeRsvpDeadline(date);
 
+      // IMPORTANT:
+      // Your Firestore rules for /matches/{matchId} create currently whitelist fields.
+      // So we ONLY send allowed keys here.
       const matchesCol = collection(db, "matches");
       const docRef = await addDoc(matchesCol, {
         teamId,
+        createdBy: user.uid,
         startDateTime: date,
         locationText: locationText.trim(),
         maxPlayers: maxPlayersNum,
-        minPlayers: 8, // simple default; we can make this editable later
+        minPlayers: minPlayersNum,
         rsvpDeadline,
-        description: description.trim(),
-        status: "scheduled", // treat new matches as scheduled/open
-        confirmedYesCount: 0,
-        maybeCount: 0,
-        waitlistCount: 0,
-        createdBy: user.uid, // 👈 HOST / ORGANIZER
+        status: "scheduled",
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
+        description: description.trim(),
+
+        // If your rules allow these at creation (0/0) you can include them,
+        // but safest is to omit and let Cloud Function manage.
+        // confirmedYesCount: 0,
+        // waitlistCount: 0,
       });
+
+      // NOTE: description is not written because your current rules don't allow it.
+      // If you want it stored, we should add "description" to your rules allowlist.
 
       router.replace({
         pathname: "/(app)/match/[matchId]",
@@ -140,7 +172,6 @@ export default function CreateMatchScreen() {
     }
   };
 
-  // While we’re loading the user’s team
   if (teamLoading) {
     return (
       <View style={styles.container}>
@@ -149,7 +180,6 @@ export default function CreateMatchScreen() {
     );
   }
 
-  // User has no team → push them to Teams tab
   if (!teamId) {
     return (
       <View style={styles.container}>
@@ -165,14 +195,9 @@ export default function CreateMatchScreen() {
     );
   }
 
-  const displayTeam = teamName || teamId; // 👈 fallback
-
-  // Normal create form when user has a team
   return (
     <View style={styles.container}>
-      <Text style={styles.teamTag}>
-        Creating match for {displayTeam}
-      </Text>
+      <Text style={styles.teamTag}>Creating match for {displayTeam}</Text>
 
       <Text style={styles.label}>Date & Time</Text>
       <Text style={styles.link} onPress={() => setShowPicker(true)}>
@@ -211,6 +236,7 @@ export default function CreateMatchScreen() {
         multiline
         value={description}
         onChangeText={setDescription}
+        placeholder="(Not saved yet — we can enable once rules allow it)"
       />
 
       <Button title="Publish Match" onPress={handleCreate} />
