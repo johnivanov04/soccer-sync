@@ -31,6 +31,9 @@ type Match = {
   createdBy?: string;
   rsvpDeadline?: any;
 
+  // ✅ saved from create screen
+  description?: string;
+
   // ✅ maintained by Cloud Function
   confirmedYesCount?: number;
   waitlistCount?: number;
@@ -179,21 +182,12 @@ export default function MatchDetailScreen() {
 
     const rsvpId = `${matchIdStr}_${user.uid}`;
 
-    console.log("RSVP DEBUG ids:", {
-      matchIdStr,
-      uid: user.uid,
-      rsvpId,
-      status,
-    });
-
     try {
       setSavingRsvp(true);
 
-      // 1) Read match fresh (this will tell us if MATCH read is what's denied)
-      console.log("RSVP DEBUG: get match doc…");
+      // Read match fresh
       const matchRef = doc(db, "matches", matchIdStr);
       const matchSnap = await getDoc(matchRef);
-      console.log("RSVP DEBUG: match read OK?", matchSnap.exists());
 
       if (!matchSnap.exists()) {
         Alert.alert("Match not found");
@@ -224,17 +218,16 @@ export default function MatchDetailScreen() {
         }
       }
 
-      // 2) Determine waitlist WITHOUT extra reads (no getDoc(rsvpRef), no query)
+      // Determine waitlist without extra reads/queries
       let isWaitlisted = false;
       if (status === "yes" && maxPlayers > 0) {
         const confirmedFromMatch = Number(matchData.confirmedYesCount);
         const localConfirmed = rsvps.filter((r) => r.status === "yes" && !r.isWaitlisted).length;
-
         const confirmed = Number.isFinite(confirmedFromMatch) ? confirmedFromMatch : localConfirmed;
         isWaitlisted = confirmed >= maxPlayers;
       }
 
-      // 3) Load displayName best-effort (this can fail safely)
+      // Best-effort displayName
       let playerName = user.email ?? user.uid;
       try {
         const userDocRef = doc(db, "users", user.uid);
@@ -247,8 +240,7 @@ export default function MatchDetailScreen() {
         console.warn("Could not load user profile for RSVP", innerErr);
       }
 
-      // 4) Write RSVP (OVERWRITE to avoid “extra field” rule failures)
-      console.log("RSVP DEBUG: setDoc (overwrite) …");
+      // Overwrite to avoid lingering extra fields
       const rsvpRef = doc(db, "rsvps", rsvpId);
       await setDoc(rsvpRef, {
         matchId: matchIdStr,
@@ -258,7 +250,6 @@ export default function MatchDetailScreen() {
         isWaitlisted,
         updatedAt: serverTimestamp(),
       });
-      console.log("RSVP DEBUG: setDoc OK");
 
       setUserStatus(status);
 
@@ -269,7 +260,7 @@ export default function MatchDetailScreen() {
         );
       }
     } catch (e) {
-      console.error("RSVP DEBUG error:", e);
+      console.error(e);
       Alert.alert("Error", "Could not update RSVP right now.");
     } finally {
       setSavingRsvp(false);
@@ -311,6 +302,7 @@ export default function MatchDetailScreen() {
       const notes = [
         "Pickup soccer match",
         match.locationText ? `Location: ${match.locationText}` : "",
+        match.description?.trim() ? `Details: ${match.description.trim()}` : "",
         deadlineText,
         `Match ID: ${String(matchIdStr)}`,
       ]
@@ -377,6 +369,10 @@ export default function MatchDetailScreen() {
       </Text>
 
       {!!match.locationText && <Text style={styles.location}>{match.locationText}</Text>}
+
+      {!!match.description?.trim() && (
+        <Text style={styles.description}>{match.description.trim()}</Text>
+      )}
 
       <View style={{ marginTop: 10 }}>
         <Text style={styles.statusPill}>Status: {statusText}</Text>
@@ -475,6 +471,13 @@ const styles = StyleSheet.create({
   container: { padding: 16 },
   title: { fontSize: 20, fontWeight: "bold" },
   location: { marginTop: 4, color: "#666" },
+
+  description: {
+    marginTop: 10,
+    color: "#333",
+    lineHeight: 18,
+  },
+
   sectionTitle: { marginTop: 16, fontWeight: "600" },
   rsvpRow: {
     flexDirection: "row",

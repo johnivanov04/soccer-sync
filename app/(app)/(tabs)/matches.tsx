@@ -8,7 +8,7 @@ import {
   query,
   where,
 } from "firebase/firestore";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   Button,
   FlatList,
@@ -20,6 +20,9 @@ import {
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
 
+const RSVP_STATUSES = ["yes", "maybe", "no"] as const;
+type RsvpStatus = (typeof RSVP_STATUSES)[number];
+
 type MatchStatus = "scheduled" | "played" | "cancelled" | string;
 
 type Match = {
@@ -27,6 +30,7 @@ type Match = {
   teamId: string;
   startDateTime?: any;
   locationText?: string;
+  description?: string;
   maxPlayers?: number;
   minPlayers?: number;
   confirmedYesCount?: number;
@@ -34,6 +38,12 @@ type Match = {
   status?: MatchStatus;
   rsvpDeadline?: any;
   createdBy?: string;
+};
+
+type MyRsvpMini = {
+  matchId: string;
+  status?: RsvpStatus;
+  isWaitlisted?: boolean;
 };
 
 function toDate(raw: any): Date {
@@ -84,6 +94,18 @@ function getChip(match: Match) {
   return { label: "Scheduled", variant: "scheduled" as const };
 }
 
+function getMyRsvpBadge(r?: MyRsvpMini | null) {
+  if (!r?.status) return null;
+
+  if (r.status === "yes") {
+    return r.isWaitlisted
+      ? { label: "⏳ Waitlisted", variant: "waitlisted" as const }
+      : { label: "✅ Confirmed", variant: "confirmed" as const };
+  }
+  if (r.status === "maybe") return { label: "🟦 Maybe", variant: "maybe" as const };
+  return { label: "⬜ No", variant: "no" as const };
+}
+
 export default function MatchesScreen() {
   const router = useRouter();
   const { user } = useAuth();
@@ -91,7 +113,9 @@ export default function MatchesScreen() {
   const [teamId, setTeamId] = useState<string | null>(null);
   const [teamName, setTeamName] = useState<string | null>(null);
   const [teamLoading, setTeamLoading] = useState(true);
+
   const [matches, setMatches] = useState<Match[]>([]);
+  const [myRsvpByMatchId, setMyRsvpByMatchId] = useState<Record<string, MyRsvpMini>>({});
 
   // 1) Subscribe to current user's teamId
   useEffect(() => {
@@ -114,7 +138,7 @@ export default function MatchesScreen() {
             data.teamId ?? data.teamCode ?? data.team ?? data.team_id ?? null;
 
           setTeamId(nextTeamId ?? null);
-          setTeamName(data.teamName ?? null); // fallback (older docs)
+          setTeamName(data.teamName ?? null);
         } else {
           setTeamId(null);
           setTeamName(null);
@@ -190,6 +214,43 @@ export default function MatchesScreen() {
     return () => unsub();
   }, [teamId]);
 
+  // 4) Subscribe to MY RSVPs (to show per-match badge)
+  useEffect(() => {
+    if (!user?.uid || !teamId) {
+      setMyRsvpByMatchId({});
+      return;
+    }
+
+    const rsvpsCol = collection(db, "rsvps");
+    const q = query(rsvpsCol, where("userId", "==", user.uid));
+
+    const unsub = onSnapshot(
+      q,
+      (snapshot) => {
+        const map: Record<string, MyRsvpMini> = {};
+        snapshot.docs.forEach((d) => {
+          const data = d.data() as any;
+          const mid = typeof data?.matchId === "string" ? data.matchId : null;
+          if (!mid) return;
+
+          map[mid] = {
+            matchId: mid,
+            status: data.status as RsvpStatus | undefined,
+            isWaitlisted: data.isWaitlisted ?? false,
+          };
+        });
+        setMyRsvpByMatchId(map);
+      },
+      (err) => {
+        console.error("My RSVPs subscription error", err);
+      }
+    );
+
+    return () => unsub();
+  }, [user?.uid, teamId]);
+
+  const matchesWithMyRsvp = useMemo(() => matches, [matches]);
+
   const renderItem = ({ item }: { item: Match }) => {
     const date = toDate(item.startDateTime);
     const chip = getChip(item);
@@ -198,6 +259,11 @@ export default function MatchesScreen() {
     const confirmed = item.confirmedYesCount ?? 0;
     const max = item.maxPlayers ?? 0;
     const waitlist = item.waitlistCount ?? 0;
+
+    const myRsvp = myRsvpByMatchId[item.id] ?? null;
+    const myBadge = getMyRsvpBadge(myRsvp);
+
+    const desc = (item.description ?? "").trim();
 
     return (
       <TouchableOpacity
@@ -215,7 +281,7 @@ export default function MatchesScreen() {
             {date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
           </Text>
 
-          <View style={[styles.chip, styles[`chip_${chip.variant}`]]}>
+          <View style={[styles.chip, (styles as any)[`chip_${chip.variant}`]]}>
             <Text style={styles.chipText}>{chip.label}</Text>
           </View>
         </View>
@@ -224,6 +290,8 @@ export default function MatchesScreen() {
           <Text style={styles.location}>{item.locationText}</Text>
         )}
 
+        {!!desc && <Text style={styles.desc} numberOfLines={2}>{desc}</Text>}
+
         <View style={styles.metaRow}>
           <Text style={styles.subtitle}>
             {confirmed}/{max || "?"} going
@@ -231,6 +299,12 @@ export default function MatchesScreen() {
 
           {waitlist > 0 && (
             <Text style={styles.waitlistText}>⏳ {waitlist} waitlist</Text>
+          )}
+
+          {!!myBadge && (
+            <View style={[styles.myBadge, (styles as any)[`myBadge_${myBadge.variant}`]]}>
+              <Text style={styles.myBadgeText}>{myBadge.label}</Text>
+            </View>
           )}
 
           {isHost && <Text style={styles.hostBadge}>👑 Host</Text>}
@@ -272,13 +346,13 @@ export default function MatchesScreen() {
       />
 
       <FlatList
-        data={matches}
+        data={matchesWithMyRsvp}
         keyExtractor={(item) => item.id}
         renderItem={renderItem}
         contentContainerStyle={{ paddingVertical: 12 }}
       />
 
-      {matches.length === 0 && (
+      {matchesWithMyRsvp.length === 0 && (
         <Text style={{ marginTop: 16, textAlign: "center" }}>
           No matches yet. Create one!
         </Text>
@@ -319,6 +393,12 @@ const styles = StyleSheet.create({
   title: { fontWeight: "bold", flex: 1 },
   location: { marginTop: 6, color: "#555" },
 
+  desc: {
+    marginTop: 6,
+    color: "#444",
+    lineHeight: 18,
+  },
+
   metaRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -355,6 +435,20 @@ const styles = StyleSheet.create({
   chip_full: { backgroundColor: "#FFE7B8" },
   chip_closed: { backgroundColor: "#E9E3FF" },
   chip_scheduled: { backgroundColor: "#EDEDED" },
+
+  myBadge: {
+    paddingVertical: 3,
+    paddingHorizontal: 8,
+    borderRadius: 999,
+  },
+  myBadgeText: {
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  myBadge_confirmed: { backgroundColor: "#DFF7E3" },
+  myBadge_waitlisted: { backgroundColor: "#FFE7B8" },
+  myBadge_maybe: { backgroundColor: "#E6F4FF" },
+  myBadge_no: { backgroundColor: "#F2F2F2" },
 
   noTeamTitle: { fontSize: 18, fontWeight: "700" },
   noTeamSub: { marginTop: 8, marginBottom: 16, color: "#555" },
