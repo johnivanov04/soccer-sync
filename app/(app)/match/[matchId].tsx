@@ -2,6 +2,7 @@
 import { useLocalSearchParams, useRouter } from "expo-router";
 import {
   collection,
+  deleteDoc,
   doc,
   getDoc,
   onSnapshot,
@@ -30,8 +31,6 @@ type Match = {
   status?: MatchStatus;
   createdBy?: string;
   rsvpDeadline?: any;
-
-  // ✅ saved from create screen
   description?: string;
 
   // ✅ maintained by Cloud Function
@@ -124,6 +123,8 @@ export default function MatchDetailScreen() {
           const nowWaitlisted =
             (mine?.status === "yes" && (mine?.isWaitlisted ?? false)) ?? false;
 
+          // If you were waitlisted and now you're confirmed while viewing the screen,
+          // show an in-app alert (Cloud Function will also send a push).
           if (prevWaitlistedRef.current !== null) {
             if (
               prevWaitlistedRef.current === true &&
@@ -175,7 +176,8 @@ export default function MatchDetailScreen() {
   const handleRsvp = async (status: RsvpStatus) => {
     if (!user || !matchIdStr) return;
 
-    if (rsvpDisabledReason) {
+    // ✅ allow NO even when RSVP is closed / cancelled / played
+    if (rsvpDisabledReason && status !== "no") {
       Alert.alert(rsvpDisabledReason);
       return;
     }
@@ -185,7 +187,7 @@ export default function MatchDetailScreen() {
     try {
       setSavingRsvp(true);
 
-      // Read match fresh
+      // Always read match fresh for maxPlayers/status/deadline
       const matchRef = doc(db, "matches", matchIdStr);
       const matchSnap = await getDoc(matchRef);
 
@@ -198,36 +200,43 @@ export default function MatchDetailScreen() {
       const maxPlayers: number = Number(matchData.maxPlayers ?? 0);
 
       const matchStatus = String(matchData.status ?? "scheduled").toLowerCase();
-      if (matchStatus === "cancelled" || matchStatus === "canceled") {
-        Alert.alert("Match cancelled", "You can’t change RSVP for a cancelled match.");
+
+      // ✅ If cancelling/played, still allow user to set NO (withdraw), but block YES/MAYBE
+      if ((matchStatus === "cancelled" || matchStatus === "canceled") && status !== "no") {
+        Alert.alert("Match cancelled", "You can’t RSVP YES/MAYBE for a cancelled match.");
         return;
       }
-      if (matchStatus === "played") {
+      if (matchStatus === "played" && status !== "no") {
         Alert.alert("Match already played", "This match is finished.");
         return;
       }
 
+      // ✅ If deadline passed, still allow NO but block YES/MAYBE
       if (matchData.rsvpDeadline) {
         const deadline = toDate(matchData.rsvpDeadline);
-        if (new Date() > deadline) {
+        if (new Date() > deadline && status !== "no") {
           Alert.alert(
             "RSVP closed",
-            "The RSVP deadline has passed. Ask the organizer directly if you still want to join."
+            "The RSVP deadline has passed. You can still leave the match (set NO), but you can’t RSVP YES/MAYBE."
           );
           return;
         }
       }
 
-      // Determine waitlist without extra reads/queries
+      // Determine waitlist flag without heavy queries
       let isWaitlisted = false;
       if (status === "yes" && maxPlayers > 0) {
         const confirmedFromMatch = Number(matchData.confirmedYesCount);
         const localConfirmed = rsvps.filter((r) => r.status === "yes" && !r.isWaitlisted).length;
+
         const confirmed = Number.isFinite(confirmedFromMatch) ? confirmedFromMatch : localConfirmed;
         isWaitlisted = confirmed >= maxPlayers;
       }
 
-      // Best-effort displayName
+      // If leaving, never be waitlisted
+      if (status === "no") isWaitlisted = false;
+
+      // Load displayName best-effort
       let playerName = user.email ?? user.uid;
       try {
         const userDocRef = doc(db, "users", user.uid);
@@ -240,7 +249,7 @@ export default function MatchDetailScreen() {
         console.warn("Could not load user profile for RSVP", innerErr);
       }
 
-      // Overwrite to avoid lingering extra fields
+      // Overwrite to avoid “extra field” rule failures
       const rsvpRef = doc(db, "rsvps", rsvpId);
       await setDoc(rsvpRef, {
         matchId: matchIdStr,
@@ -260,11 +269,43 @@ export default function MatchDetailScreen() {
         );
       }
     } catch (e) {
-      console.error(e);
+      console.error("RSVP error:", e);
       Alert.alert("Error", "Could not update RSVP right now.");
     } finally {
       setSavingRsvp(false);
     }
+  };
+
+  const removeRsvpDoc = async () => {
+    if (!user || !matchIdStr) return;
+
+    const rsvpId = `${matchIdStr}_${user.uid}`;
+    const rsvpRef = doc(db, "rsvps", rsvpId);
+
+    try {
+      setSavingRsvp(true);
+      await deleteDoc(rsvpRef);
+
+      // local UI cleanup (snapshots will also update shortly)
+      setUserStatus(null);
+      prevWaitlistedRef.current = null;
+    } catch (e) {
+      console.error("Remove RSVP error:", e);
+      Alert.alert("Error", "Could not remove RSVP right now.");
+    } finally {
+      setSavingRsvp(false);
+    }
+  };
+
+  const confirmRemoveRsvp = () => {
+    Alert.alert(
+      "Remove RSVP?",
+      "This will delete your RSVP record for this match.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Remove", style: "destructive", onPress: () => void removeRsvpDoc() },
+      ]
+    );
   };
 
   const setMatchStatus = async (nextStatus: "scheduled" | "played" | "cancelled") => {
@@ -302,8 +343,8 @@ export default function MatchDetailScreen() {
       const notes = [
         "Pickup soccer match",
         match.locationText ? `Location: ${match.locationText}` : "",
-        match.description?.trim() ? `Details: ${match.description.trim()}` : "",
         deadlineText,
+        match.description ? `Notes: ${match.description}` : "",
         `Match ID: ${String(matchIdStr)}`,
       ]
         .filter(Boolean)
@@ -370,9 +411,7 @@ export default function MatchDetailScreen() {
 
       {!!match.locationText && <Text style={styles.location}>{match.locationText}</Text>}
 
-      {!!match.description?.trim() && (
-        <Text style={styles.description}>{match.description.trim()}</Text>
-      )}
+      {!!match.description && <Text style={styles.description}>{match.description}</Text>}
 
       <View style={{ marginTop: 10 }}>
         <Text style={styles.statusPill}>Status: {statusText}</Text>
@@ -403,7 +442,8 @@ export default function MatchDetailScreen() {
             title={s.toUpperCase()}
             color={userStatus === s ? "#007AFF" : "#aaa"}
             onPress={() => handleRsvp(s)}
-            disabled={savingRsvp || !!rsvpDisabledReason}
+            // ✅ allow "NO" even when disabled; block YES/MAYBE
+            disabled={savingRsvp || (!!rsvpDisabledReason && s !== "no")}
           />
         ))}
       </View>
@@ -413,8 +453,30 @@ export default function MatchDetailScreen() {
           ? userWaitlisted
             ? "You’re on the waitlist for this match."
             : "You’re confirmed for this match."
+          : userStatus === "maybe"
+          ? "You’re marked as maybe."
+          : userStatus === "no"
+          ? "You’re marked as not going."
           : "Tap YES, MAYBE, or NO to update your status."}
       </Text>
+
+      {/* ✅ Leave / Remove controls */}
+      {!!myRsvp && (
+        <View style={{ marginTop: 10 }}>
+          <Button
+            title="Leave match (set to NO)"
+            onPress={() => handleRsvp("no")}
+            disabled={savingRsvp}
+          />
+          <View style={{ height: 8 }} />
+          <Button
+            title="Remove RSVP (delete)"
+            color="#d11"
+            onPress={confirmRemoveRsvp}
+            disabled={savingRsvp}
+          />
+        </View>
+      )}
 
       <Text style={styles.sectionTitle}>Going</Text>
       {going.length === 0 && <Text>No confirmed players yet.</Text>}
@@ -471,13 +533,7 @@ const styles = StyleSheet.create({
   container: { padding: 16 },
   title: { fontSize: 20, fontWeight: "bold" },
   location: { marginTop: 4, color: "#666" },
-
-  description: {
-    marginTop: 10,
-    color: "#333",
-    lineHeight: 18,
-  },
-
+  description: { marginTop: 8, color: "#444" },
   sectionTitle: { marginTop: 16, fontWeight: "600" },
   rsvpRow: {
     flexDirection: "row",
