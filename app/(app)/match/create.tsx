@@ -7,18 +7,13 @@ import { Alert, Button, StyleSheet, Text, TextInput, View } from "react-native";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
 
-function computeRsvpDeadline(start: Date): Date {
-  const now = new Date();
-  const msUntilStart = start.getTime() - now.getTime();
-  const dayMs = 24 * 60 * 60 * 1000;
-  const min30Ms = 30 * 60 * 1000;
-
-  // If match is >= 24h away => deadline = 24h before
-  if (msUntilStart >= dayMs) return new Date(start.getTime() - dayMs);
-
-  // Else deadline = 30 minutes before start, but never earlier than "now"
-  const d = new Date(start.getTime() - min30Ms);
-  if (d.getTime() < now.getTime()) return start; // open until kickoff for soon matches
+function computeRsvpDeadline(start: Date) {
+  // default: 24h before start
+  const d = new Date(start.getTime() - 24 * 60 * 60 * 1000);
+  // if that deadline is already in the past, set it a little into the future
+  if (d.getTime() < Date.now()) {
+    return new Date(Date.now() + 15 * 60 * 1000);
+  }
   return d;
 }
 
@@ -26,79 +21,119 @@ export default function CreateMatchScreen() {
   const router = useRouter();
   const { user } = useAuth();
 
-  const [date, setDate] = useState(new Date(Date.now() + 2 * 60 * 60 * 1000));
+  const [date, setDate] = useState<Date>(() => new Date(Date.now() + 60 * 60 * 1000));
   const [showPicker, setShowPicker] = useState(false);
+
   const [locationText, setLocationText] = useState("");
   const [maxPlayers, setMaxPlayers] = useState("14");
   const [description, setDescription] = useState("");
 
-  const [teamId, setTeamId] = useState<string | null>(null);
-  const [teamName, setTeamName] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+
   const [teamLoading, setTeamLoading] = useState(true);
+  const [teamId, setTeamId] = useState<string | null>(null);
+  const [teamName, setTeamName] = useState<string>("");
 
-  const displayTeam = useMemo(() => teamName || teamId, [teamName, teamId]);
-  const computedDeadline = useMemo(() => computeRsvpDeadline(date), [date]);
-
+  // Load the user's teamId, then optionally team name
   useEffect(() => {
-    if (!user?.uid) {
-      setTeamLoading(false);
+    let alive = true;
+
+    async function loadTeam() {
+      try {
+        if (!user?.uid) {
+          if (!alive) return;
+          setTeamId(null);
+          setTeamName("");
+          setTeamLoading(false);
+          return;
+        }
+
+        setTeamLoading(true);
+
+        const userRef = doc(db, "users", user.uid);
+        const userSnap = await getDoc(userRef);
+
+        const data = userSnap.exists() ? (userSnap.data() as any) : null;
+        const tid =
+          data?.teamId ?? data?.teamCode ?? data?.team ?? data?.team_id ?? null;
+
+        if (!alive) return;
+
+        if (!tid) {
+          setTeamId(null);
+          setTeamName("");
+          setTeamLoading(false);
+          return;
+        }
+
+        setTeamId(String(tid));
+
+        // Optional: look up team name if you have teams/{teamId}.name
+        try {
+          const teamRef = doc(db, "teams", String(tid));
+          const teamSnap = await getDoc(teamRef);
+          const tname = teamSnap.exists() ? (teamSnap.data() as any)?.name : "";
+          if (alive) setTeamName(tname || "");
+        } catch {
+          // ignore name lookup errors
+        }
+
+        if (alive) setTeamLoading(false);
+      } catch (e) {
+        console.error("Error loading team", e);
+        if (!alive) return;
+        setTeamId(null);
+        setTeamName("");
+        setTeamLoading(false);
+      }
+    }
+
+    loadTeam();
+    return () => {
+      alive = false;
+    };
+  }, [user?.uid]);
+
+  const displayTeam = useMemo(() => teamName || teamId || "", [teamName, teamId]);
+
+  const isDirty = useMemo(() => {
+    return (
+      locationText.trim().length > 0 ||
+      description.trim().length > 0 ||
+      maxPlayers.trim() !== "14"
+      // (date is always set; we don't treat it as "dirty" by default)
+    );
+  }, [locationText, description, maxPlayers]);
+
+  const handleCancel = () => {
+    const leave = () => router.back();
+
+    if (!isDirty) {
+      leave();
       return;
     }
 
-    const loadUserProfile = async () => {
-      try {
-        const userRef = doc(db, "users", user.uid);
-        const snap = await getDoc(userRef);
-
-        if (snap.exists()) {
-          const data = snap.data() as any;
-          const currentTeamId = data.teamId ?? null;
-          setTeamId(currentTeamId);
-
-          const name =
-            (data.teamName as string | undefined) ?? (currentTeamId as string | null);
-          setTeamName(name ?? null);
-        } else {
-          setTeamId(null);
-          setTeamName(null);
-        }
-      } catch (err) {
-        console.error("Error loading user profile for match creation", err);
-        setTeamId(null);
-        setTeamName(null);
-      } finally {
-        setTeamLoading(false);
-      }
-    };
-
-    loadUserProfile();
-  }, [user?.uid]);
+    Alert.alert(
+      "Discard match?",
+      "Your draft match details will be lost.",
+      [
+        { text: "Keep editing", style: "cancel" },
+        { text: "Discard", style: "destructive", onPress: leave },
+      ]
+    );
+  };
 
   const handleCreate = async () => {
     if (!user?.uid) {
-      Alert.alert("Please sign in again.");
+      Alert.alert("Please sign in");
       return;
     }
-
     if (!teamId) {
-      Alert.alert("Join a team first", "You need to join or create a team before creating matches.");
+      Alert.alert("You’re not on a team yet.");
       return;
     }
-
     if (!locationText.trim()) {
       Alert.alert("Location required");
-      return;
-    }
-
-    const maxPlayersNum = Math.floor(Number(maxPlayers));
-    if (!Number.isFinite(maxPlayersNum) || maxPlayersNum <= 0) {
-      Alert.alert("Max players must be a positive number.");
-      return;
-    }
-
-    const minPlayersNum = 8;
-    if (minPlayersNum > maxPlayersNum) {
-      Alert.alert("Min players cannot be greater than max players.");
       return;
     }
 
@@ -108,32 +143,31 @@ export default function CreateMatchScreen() {
       return;
     }
 
-    const desc = description.trim();
-    if (desc.length > 800) {
-      Alert.alert("Description too long", "Keep it under 800 characters.");
+    const maxPlayersNum = Number(maxPlayers);
+    if (!Number.isFinite(maxPlayersNum) || !Number.isInteger(maxPlayersNum) || maxPlayersNum <= 0) {
+      Alert.alert("Max players must be a positive whole number.");
       return;
     }
 
     try {
+      setCreating(true);
+
       const rsvpDeadline = computeRsvpDeadline(date);
 
       const matchesCol = collection(db, "matches");
       const docRef = await addDoc(matchesCol, {
-        teamId,
-        createdBy: user.uid,
+        teamId: String(teamId),
         startDateTime: date,
         locationText: locationText.trim(),
         maxPlayers: maxPlayersNum,
-        minPlayers: minPlayersNum,
+        description: description.trim() || "",
         rsvpDeadline,
-        description: desc,
+
+        createdBy: user.uid,
         status: "scheduled",
+
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
-
-        // safe at creation (your rules allow missing OR 0)
-        confirmedYesCount: 0,
-        waitlistCount: 0,
       });
 
       router.replace({
@@ -143,6 +177,8 @@ export default function CreateMatchScreen() {
     } catch (e) {
       console.error(e);
       Alert.alert("Error", "Could not create match.");
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -150,6 +186,9 @@ export default function CreateMatchScreen() {
     return (
       <View style={styles.container}>
         <Text>Loading your team...</Text>
+        <View style={{ marginTop: 12 }}>
+          <Button title="Cancel" color="#999" onPress={handleCancel} disabled={creating} />
+        </View>
       </View>
     );
   }
@@ -162,18 +201,24 @@ export default function CreateMatchScreen() {
           Join or create a team from the Teams tab before creating matches.
         </Text>
         <Button title="Go to Teams" onPress={() => router.push("/(app)/(tabs)/teams")} />
+        <View style={{ marginTop: 12 }}>
+          <Button title="Cancel" color="#999" onPress={handleCancel} />
+        </View>
       </View>
     );
   }
 
   return (
     <View style={styles.container}>
-      <Text style={styles.teamTag}>Creating match for {displayTeam}</Text>
+      {!!displayTeam && (
+        <Text style={styles.teamTag}>Creating match for {displayTeam}</Text>
+      )}
 
       <Text style={styles.label}>Date & Time</Text>
       <Text style={styles.link} onPress={() => setShowPicker(true)}>
         {date.toLocaleString()}
       </Text>
+
       {showPicker && (
         <DateTimePicker
           value={date}
@@ -185,14 +230,10 @@ export default function CreateMatchScreen() {
         />
       )}
 
-      <Text style={styles.subtle}>
-        RSVP deadline (auto): {computedDeadline.toLocaleString()}
-      </Text>
-
       <Text style={styles.label}>Location</Text>
       <TextInput
         style={styles.input}
-        placeholder="e.g., Riverside Park, Field 3"
+        placeholder="e.g. Riverside Park, Field 3"
         value={locationText}
         onChangeText={setLocationText}
       />
@@ -213,9 +254,23 @@ export default function CreateMatchScreen() {
         onChangeText={setDescription}
         placeholder="Anything players should know (shoes, parking, who brings balls, etc.)"
       />
-      <Text style={styles.subtle}>{description.trim().length}/800</Text>
 
-      <Button title="Publish Match" onPress={handleCreate} />
+      <View style={{ marginTop: 24 }}>
+        <Button
+          title={creating ? "Publishing..." : "Publish Match"}
+          onPress={handleCreate}
+          disabled={creating}
+        />
+      </View>
+
+      <View style={{ marginTop: 12 }}>
+        <Button
+          title="Cancel"
+          color="#999"
+          onPress={handleCancel}
+          disabled={creating}
+        />
+      </View>
     </View>
   );
 }
@@ -223,7 +278,6 @@ export default function CreateMatchScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 16 },
   label: { marginTop: 16, marginBottom: 4, fontWeight: "600" },
-  subtle: { marginTop: 6, color: "#666" },
   input: {
     borderWidth: 1,
     borderColor: "#ccc",
