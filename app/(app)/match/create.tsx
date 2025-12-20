@@ -1,9 +1,23 @@
 // app/(app)/match/create.tsx
 import DateTimePicker from "@react-native-community/datetimepicker";
 import { useRouter } from "expo-router";
-import { addDoc, collection, doc, getDoc, serverTimestamp } from "firebase/firestore";
+import {
+  addDoc,
+  collection,
+  doc,
+  getDoc,
+  serverTimestamp,
+} from "firebase/firestore";
 import React, { useEffect, useMemo, useState } from "react";
-import { Alert, Button, StyleSheet, Text, TextInput, View } from "react-native";
+import {
+  Alert,
+  Button,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
 
@@ -21,7 +35,9 @@ export default function CreateMatchScreen() {
   const router = useRouter();
   const { user } = useAuth();
 
-  const [date, setDate] = useState<Date>(() => new Date(Date.now() + 60 * 60 * 1000));
+  const [date, setDate] = useState<Date>(
+    () => new Date(Date.now() + 60 * 60 * 1000)
+  );
   const [showPicker, setShowPicker] = useState(false);
 
   const [locationText, setLocationText] = useState("");
@@ -55,7 +71,11 @@ export default function CreateMatchScreen() {
 
         const data = userSnap.exists() ? (userSnap.data() as any) : null;
         const tid =
-          data?.teamId ?? data?.teamCode ?? data?.team ?? data?.team_id ?? null;
+          data?.teamId ??
+          data?.teamCode ??
+          data?.team ??
+          data?.team_id ??
+          null;
 
         if (!alive) return;
 
@@ -72,7 +92,9 @@ export default function CreateMatchScreen() {
         try {
           const teamRef = doc(db, "teams", String(tid));
           const teamSnap = await getDoc(teamRef);
-          const tname = teamSnap.exists() ? (teamSnap.data() as any)?.name : "";
+          const tname = teamSnap.exists()
+            ? (teamSnap.data() as any)?.name
+            : "";
           if (alive) setTeamName(tname || "");
         } catch {
           // ignore name lookup errors
@@ -94,7 +116,10 @@ export default function CreateMatchScreen() {
     };
   }, [user?.uid]);
 
-  const displayTeam = useMemo(() => teamName || teamId || "", [teamName, teamId]);
+  const displayTeam = useMemo(
+    () => teamName || teamId || "",
+    [teamName, teamId]
+  );
 
   const isDirty = useMemo(() => {
     return (
@@ -113,14 +138,10 @@ export default function CreateMatchScreen() {
       return;
     }
 
-    Alert.alert(
-      "Discard match?",
-      "Your draft match details will be lost.",
-      [
-        { text: "Keep editing", style: "cancel" },
-        { text: "Discard", style: "destructive", onPress: leave },
-      ]
-    );
+    Alert.alert("Discard match?", "Your draft match details will be lost.", [
+      { text: "Keep editing", style: "cancel" },
+      { text: "Discard", style: "destructive", onPress: leave },
+    ]);
   };
 
   const handleCreate = async () => {
@@ -144,7 +165,11 @@ export default function CreateMatchScreen() {
     }
 
     const maxPlayersNum = Number(maxPlayers);
-    if (!Number.isFinite(maxPlayersNum) || !Number.isInteger(maxPlayersNum) || maxPlayersNum <= 0) {
+    if (
+      !Number.isFinite(maxPlayersNum) ||
+      !Number.isInteger(maxPlayersNum) ||
+      maxPlayersNum <= 0
+    ) {
       Alert.alert("Max players must be a positive whole number.");
       return;
     }
@@ -184,98 +209,113 @@ export default function CreateMatchScreen() {
 
   if (teamLoading) {
     return (
-      <View style={styles.container}>
-        <Text>Loading your team...</Text>
-        <View style={{ marginTop: 12 }}>
-          <Button title="Cancel" color="#999" onPress={handleCancel} disabled={creating} />
+      <SafeAreaView style={styles.safe} edges={["top"]}>
+        <View style={styles.container}>
+          <Text>Loading your team...</Text>
+          <View style={{ marginTop: 12 }}>
+            <Button
+              title="Cancel"
+              color="#999"
+              onPress={handleCancel}
+              disabled={creating}
+            />
+          </View>
         </View>
-      </View>
+      </SafeAreaView>
     );
   }
 
   if (!teamId) {
     return (
-      <View style={styles.container}>
-        <Text style={styles.label}>You’re not on a team yet.</Text>
-        <Text style={{ marginTop: 8, marginBottom: 16 }}>
-          Join or create a team from the Teams tab before creating matches.
-        </Text>
-        <Button title="Go to Teams" onPress={() => router.push("/(app)/(tabs)/teams")} />
-        <View style={{ marginTop: 12 }}>
-          <Button title="Cancel" color="#999" onPress={handleCancel} />
+      <SafeAreaView style={styles.safe} edges={["top"]}>
+        <View style={styles.container}>
+          <Text style={styles.label}>You’re not on a team yet.</Text>
+          <Text style={{ marginTop: 8, marginBottom: 16 }}>
+            Join or create a team from the Teams tab before creating matches.
+          </Text>
+          <Button
+            title="Go to Teams"
+            onPress={() => router.push("/(app)/(tabs)/teams")}
+          />
+          <View style={{ marginTop: 12 }}>
+            <Button title="Cancel" color="#999" onPress={handleCancel} />
+          </View>
         </View>
-      </View>
+      </SafeAreaView>
     );
   }
 
   return (
-    <View style={styles.container}>
-      {!!displayTeam && (
-        <Text style={styles.teamTag}>Creating match for {displayTeam}</Text>
-      )}
+    <SafeAreaView style={styles.safe} edges={["top"]}>
+      <View style={styles.container}>
+        {!!displayTeam && (
+          <Text style={styles.teamTag}>Creating match for {displayTeam}</Text>
+        )}
 
-      <Text style={styles.label}>Date & Time</Text>
-      <Text style={styles.link} onPress={() => setShowPicker(true)}>
-        {date.toLocaleString()}
-      </Text>
+        <Text style={styles.label}>Date & Time</Text>
+        <Text style={styles.link} onPress={() => setShowPicker(true)}>
+          {date.toLocaleString()}
+        </Text>
 
-      {showPicker && (
-        <DateTimePicker
-          value={date}
-          mode="datetime"
-          onChange={(event, selectedDate) => {
-            setShowPicker(false);
-            if (selectedDate) setDate(selectedDate);
-          }}
+        {showPicker && (
+          <DateTimePicker
+            value={date}
+            mode="datetime"
+            onChange={(event, selectedDate) => {
+              setShowPicker(false);
+              if (selectedDate) setDate(selectedDate);
+            }}
+          />
+        )}
+
+        <Text style={styles.label}>Location</Text>
+        <TextInput
+          style={styles.input}
+          placeholder="e.g. Riverside Park, Field 3"
+          value={locationText}
+          onChangeText={setLocationText}
         />
-      )}
 
-      <Text style={styles.label}>Location</Text>
-      <TextInput
-        style={styles.input}
-        placeholder="e.g. Riverside Park, Field 3"
-        value={locationText}
-        onChangeText={setLocationText}
-      />
-
-      <Text style={styles.label}>Max Players</Text>
-      <TextInput
-        style={styles.input}
-        keyboardType="numeric"
-        value={maxPlayers}
-        onChangeText={setMaxPlayers}
-      />
-
-      <Text style={styles.label}>Description (optional)</Text>
-      <TextInput
-        style={[styles.input, { height: 80 }]}
-        multiline
-        value={description}
-        onChangeText={setDescription}
-        placeholder="Anything players should know (shoes, parking, who brings balls, etc.)"
-      />
-
-      <View style={{ marginTop: 24 }}>
-        <Button
-          title={creating ? "Publishing..." : "Publish Match"}
-          onPress={handleCreate}
-          disabled={creating}
+        <Text style={styles.label}>Max Players</Text>
+        <TextInput
+          style={styles.input}
+          keyboardType="numeric"
+          value={maxPlayers}
+          onChangeText={setMaxPlayers}
         />
+
+        <Text style={styles.label}>Description (optional)</Text>
+        <TextInput
+          style={[styles.input, { height: 80 }]}
+          multiline
+          value={description}
+          onChangeText={setDescription}
+          placeholder="Anything players should know (shoes, parking, who brings balls, etc.)"
+        />
+
+        <View style={{ marginTop: 24 }}>
+          <Button
+            title={creating ? "Publishing..." : "Publish Match"}
+            onPress={handleCreate}
+            disabled={creating}
+          />
+        </View>
+
+        <View style={{ marginTop: 12 }}>
+          <Button
+            title="Cancel"
+            color="#999"
+            onPress={handleCancel}
+            disabled={creating}
+          />
+        </View>
       </View>
-
-      <View style={{ marginTop: 12 }}>
-        <Button
-          title="Cancel"
-          color="#999"
-          onPress={handleCancel}
-          disabled={creating}
-        />
-      </View>
-    </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  safe: { flex: 1 },
   container: { flex: 1, padding: 16 },
   label: { marginTop: 16, marginBottom: 4, fontWeight: "600" },
   input: {
