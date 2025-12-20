@@ -23,6 +23,7 @@ import {
   Text,
   View,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
 import { addMatchToCalendar } from "../../../src/utils/calendarExport";
@@ -247,7 +248,10 @@ export default function MatchDetailScreen() {
     [rsvps]
   );
 
-  const myRsvp = useMemo(() => rsvps.find((r) => r.userId === user?.uid), [rsvps, user?.uid]);
+  const myRsvp = useMemo(
+    () => rsvps.find((r) => r.userId === user?.uid),
+    [rsvps, user?.uid]
+  );
   const userWaitlisted = myRsvp?.isWaitlisted ?? false;
 
   const maxPlayers = Number(match?.maxPlayers ?? 0);
@@ -260,7 +264,9 @@ export default function MatchDetailScreen() {
   const deadlineMs = deadlineAt ? deadlineAt.getTime() - nowTick : null;
 
   const startLabel =
-    startMs >= 0 ? `Starts in ${formatCountdown(startMs)}` : `Started ${formatCountdown(-startMs)} ago`;
+    startMs >= 0
+      ? `Starts in ${formatCountdown(startMs)}`
+      : `Started ${formatCountdown(-startMs)} ago`;
 
   const rsvpLabel = deadlineAt
     ? deadlineMs !== null && deadlineMs >= 0
@@ -459,20 +465,26 @@ export default function MatchDetailScreen() {
     }
   };
 
-  if (!matchIdStr) {
+  const renderScroll = (children: React.ReactNode) => {
     return (
-      <View style={styles.container}>
-        <Text>Missing match id.</Text>
-      </View>
+      <SafeAreaView style={styles.safe} edges={["top"]}>
+        <ScrollView
+          style={{ flex: 1 }}
+          contentInsetAdjustmentBehavior="automatic"
+          contentContainerStyle={styles.container}
+        >
+          {children}
+        </ScrollView>
+      </SafeAreaView>
     );
+  };
+
+  if (!matchIdStr) {
+    return renderScroll(<Text>Missing match id.</Text>);
   }
 
   if (loadingMatch || !match) {
-    return (
-      <View style={styles.container}>
-        <Text>Loading match...</Text>
-      </View>
-    );
+    return renderScroll(<Text>Loading match...</Text>);
   }
 
   const statusText =
@@ -482,8 +494,8 @@ export default function MatchDetailScreen() {
       ? "Cancelled"
       : "Scheduled";
 
-  return (
-    <ScrollView contentContainerStyle={styles.container}>
+  return renderScroll(
+    <>
       <Text style={styles.title}>
         {startAt.toLocaleDateString()}{" "}
         {startAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -624,11 +636,12 @@ export default function MatchDetailScreen() {
 
       <View style={{ height: 40 }} />
       <Button title="Back to matches" onPress={() => router.back()} />
-    </ScrollView>
+    </>
   );
 }
 
 const styles = StyleSheet.create({
+  safe: { flex: 1 },
   container: { padding: 16 },
   title: { fontSize: 20, fontWeight: "bold" },
 
