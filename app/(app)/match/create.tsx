@@ -1,24 +1,26 @@
 // app/(app)/match/create.tsx
 import DateTimePicker from "@react-native-community/datetimepicker";
 import { useRouter } from "expo-router";
-import {
-  addDoc,
-  collection,
-  doc,
-  getDoc,
-  serverTimestamp,
-} from "firebase/firestore";
+import { addDoc, collection, doc, getDoc, serverTimestamp } from "firebase/firestore";
 import React, { useEffect, useMemo, useState } from "react";
-import {
-  Alert,
-  Button,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from "react-native";
+import { Alert, Button, StyleSheet, Text, TextInput, View } from "react-native";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
+
+function computeRsvpDeadline(start: Date): Date {
+  const now = new Date();
+  const msUntilStart = start.getTime() - now.getTime();
+  const dayMs = 24 * 60 * 60 * 1000;
+  const min30Ms = 30 * 60 * 1000;
+
+  // If match is >= 24h away => deadline = 24h before
+  if (msUntilStart >= dayMs) return new Date(start.getTime() - dayMs);
+
+  // Else deadline = 30 minutes before start, but never earlier than "now"
+  const d = new Date(start.getTime() - min30Ms);
+  if (d.getTime() < now.getTime()) return start; // open until kickoff for soon matches
+  return d;
+}
 
 export default function CreateMatchScreen() {
   const router = useRouter();
@@ -35,6 +37,7 @@ export default function CreateMatchScreen() {
   const [teamLoading, setTeamLoading] = useState(true);
 
   const displayTeam = useMemo(() => teamName || teamId, [teamName, teamId]);
+  const computedDeadline = useMemo(() => computeRsvpDeadline(date), [date]);
 
   useEffect(() => {
     if (!user?.uid) {
@@ -53,8 +56,7 @@ export default function CreateMatchScreen() {
           setTeamId(currentTeamId);
 
           const name =
-            (data.teamName as string | undefined) ??
-            (currentTeamId as string | null);
+            (data.teamName as string | undefined) ?? (currentTeamId as string | null);
           setTeamName(name ?? null);
         } else {
           setTeamId(null);
@@ -72,19 +74,6 @@ export default function CreateMatchScreen() {
     loadUserProfile();
   }, [user?.uid]);
 
-  function computeRsvpDeadline(start: Date): Date {
-    const now = new Date();
-    const msUntilStart = start.getTime() - now.getTime();
-    const dayMs = 24 * 60 * 60 * 1000;
-    const min30Ms = 30 * 60 * 1000;
-
-    if (msUntilStart >= dayMs) return new Date(start.getTime() - dayMs);
-
-    const d = new Date(start.getTime() - min30Ms);
-    if (d.getTime() < now.getTime()) return start; // open until kickoff for soon matches
-    return d;
-  }
-
   const handleCreate = async () => {
     if (!user?.uid) {
       Alert.alert("Please sign in again.");
@@ -92,10 +81,7 @@ export default function CreateMatchScreen() {
     }
 
     if (!teamId) {
-      Alert.alert(
-        "Join a team first",
-        "You need to join or create a team before creating matches."
-      );
+      Alert.alert("Join a team first", "You need to join or create a team before creating matches.");
       return;
     }
 
@@ -122,6 +108,12 @@ export default function CreateMatchScreen() {
       return;
     }
 
+    const desc = description.trim();
+    if (desc.length > 800) {
+      Alert.alert("Description too long", "Keep it under 800 characters.");
+      return;
+    }
+
     try {
       const rsvpDeadline = computeRsvpDeadline(date);
 
@@ -134,7 +126,7 @@ export default function CreateMatchScreen() {
         maxPlayers: maxPlayersNum,
         minPlayers: minPlayersNum,
         rsvpDeadline,
-        description: description.trim(),
+        description: desc,
         status: "scheduled",
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
@@ -169,10 +161,7 @@ export default function CreateMatchScreen() {
         <Text style={{ marginTop: 8, marginBottom: 16 }}>
           Join or create a team from the Teams tab before creating matches.
         </Text>
-        <Button
-          title="Go to Teams"
-          onPress={() => router.push("/(app)/(tabs)/teams")}
-        />
+        <Button title="Go to Teams" onPress={() => router.push("/(app)/(tabs)/teams")} />
       </View>
     );
   }
@@ -195,6 +184,10 @@ export default function CreateMatchScreen() {
           }}
         />
       )}
+
+      <Text style={styles.subtle}>
+        RSVP deadline (auto): {computedDeadline.toLocaleString()}
+      </Text>
 
       <Text style={styles.label}>Location</Text>
       <TextInput
@@ -220,6 +213,7 @@ export default function CreateMatchScreen() {
         onChangeText={setDescription}
         placeholder="Anything players should know (shoes, parking, who brings balls, etc.)"
       />
+      <Text style={styles.subtle}>{description.trim().length}/800</Text>
 
       <Button title="Publish Match" onPress={handleCreate} />
     </View>
@@ -229,6 +223,7 @@ export default function CreateMatchScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 16 },
   label: { marginTop: 16, marginBottom: 4, fontWeight: "600" },
+  subtle: { marginTop: 6, color: "#666" },
   input: {
     borderWidth: 1,
     borderColor: "#ccc",

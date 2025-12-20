@@ -1,24 +1,18 @@
 // app/(app)/match/edit.tsx
 import DateTimePicker from "@react-native-community/datetimepicker";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import {
-    deleteField,
-    doc,
-    getDoc,
-    serverTimestamp,
-    updateDoc,
-} from "firebase/firestore";
+import { deleteField, doc, getDoc, serverTimestamp, updateDoc } from "firebase/firestore";
 import React, { useEffect, useMemo, useState } from "react";
 import {
-    ActivityIndicator,
-    Alert,
-    Button,
-    ScrollView,
-    StyleSheet,
-    Switch,
-    Text,
-    TextInput,
-    View,
+  ActivityIndicator,
+  Alert,
+  Button,
+  ScrollView,
+  StyleSheet,
+  Switch,
+  Text,
+  TextInput,
+  View,
 } from "react-native";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
@@ -73,16 +67,8 @@ export default function EditMatchScreen() {
         setDate(start);
 
         setLocationText(data.locationText || "");
-        setMaxPlayers(
-          data.maxPlayers !== undefined && data.maxPlayers !== null
-            ? String(data.maxPlayers)
-            : ""
-        );
-        setMinPlayers(
-          data.minPlayers !== undefined && data.minPlayers !== null
-            ? String(data.minPlayers)
-            : ""
-        );
+        setMaxPlayers(data.maxPlayers != null ? String(data.maxPlayers) : "");
+        setMinPlayers(data.minPlayers != null ? String(data.minPlayers) : "");
         setDescription(data.description || "");
 
         if (data.rsvpDeadline) {
@@ -155,10 +141,15 @@ export default function EditMatchScreen() {
       return;
     }
 
-    // Prevent obvious accidental past scheduling (allow small clock skew)
     const now = Date.now();
     if (date.getTime() < now - 5 * 60 * 1000) {
       Alert.alert("Start time must be in the future.");
+      return;
+    }
+
+    const desc = description.trim();
+    if (desc.length > 800) {
+      Alert.alert("Description too long", "Keep it under 800 characters.");
       return;
     }
 
@@ -167,9 +158,7 @@ export default function EditMatchScreen() {
 
     try {
       maxPlayersNum = parsePositiveInt("Max players", maxPlayers.trim());
-      minPlayersNum = minPlayers.trim()
-        ? parseNonNegativeInt("Min players", minPlayers.trim())
-        : 0;
+      minPlayersNum = minPlayers.trim() ? parseNonNegativeInt("Min players", minPlayers.trim()) : 0;
 
       if (minPlayersNum > maxPlayersNum) {
         Alert.alert("Min players can’t exceed max players.");
@@ -200,10 +189,8 @@ export default function EditMatchScreen() {
         locationText: locationText.trim(),
         maxPlayers: maxPlayersNum,
         minPlayers: minPlayersNum,
-        description: description.trim(),
-        ...(useDeadline
-          ? { rsvpDeadline: deadlineDate }
-          : { rsvpDeadline: deleteField() }),
+        description: desc,
+        ...(useDeadline ? { rsvpDeadline: deadlineDate } : { rsvpDeadline: deleteField() }),
         updatedAt: serverTimestamp(),
       });
 
@@ -336,13 +323,10 @@ export default function EditMatchScreen() {
         value={description}
         onChangeText={setDescription}
       />
+      <Text style={styles.subtle}>{description.trim().length}/800</Text>
 
       <View style={{ marginTop: 24 }}>
-        <Button
-          title={saving ? "Saving..." : "Save changes"}
-          onPress={handleSave}
-          disabled={saving}
-        />
+        <Button title={saving ? "Saving..." : "Save changes"} onPress={handleSave} disabled={saving} />
       </View>
 
       <View style={{ marginTop: 12 }}>
@@ -353,44 +337,18 @@ export default function EditMatchScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    padding: 16,
-    paddingBottom: 40,
-  },
-  centered: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    padding: 16,
-  },
-  header: {
-    fontSize: 22,
-    fontWeight: "600",
-    marginBottom: 16,
-  },
-  label: {
-    marginTop: 16,
-    marginBottom: 4,
-    fontWeight: "600",
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: "#ccc",
-    borderRadius: 8,
-    padding: 10,
-  },
-  link: {
-    color: "blue",
-    paddingVertical: 6,
-  },
+  container: { padding: 16, paddingBottom: 40 },
+  centered: { flex: 1, justifyContent: "center", alignItems: "center", padding: 16 },
+  header: { fontSize: 22, fontWeight: "600", marginBottom: 16 },
+  label: { marginTop: 16, marginBottom: 4, fontWeight: "600" },
+  subtle: { marginTop: 6, color: "#666" },
+  input: { borderWidth: 1, borderColor: "#ccc", borderRadius: 8, padding: 10 },
+  link: { color: "blue", paddingVertical: 6 },
   deadlineRow: {
     marginTop: 16,
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
   },
-  switchRow: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
+  switchRow: { flexDirection: "row", alignItems: "center" },
 });

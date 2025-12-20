@@ -19,8 +19,6 @@ function computeEnd(startAt: Date, endAt?: Date) {
  * Opens the OS “Create Event” dialog pre-filled with your match info.
  * - iOS: presents Apple Calendar event editor (user can choose calendar/account)
  * - Android: opens the system calendar app “new event” screen
- *
- * Returns a small result object so callers can decide whether to show a toast/alert.
  */
 export async function addMatchToCalendar(match: MatchForCalendar): Promise<{
   action: "saved" | "done" | "canceled" | "deleted" | "responded" | string;
@@ -34,7 +32,6 @@ export async function addMatchToCalendar(match: MatchForCalendar): Promise<{
   const startDate = match.startAt;
   const endDate = computeEnd(match.startAt, match.endAt);
 
-  // This launches the system-provided UI for creating an event. :contentReference[oaicite:1]{index=1}
   const result = (await Calendar.createEventInCalendarAsync({
     title: match.title || "Pickup Soccer",
     startDate,

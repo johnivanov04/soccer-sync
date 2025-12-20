@@ -13,7 +13,16 @@ import {
   where,
 } from "firebase/firestore";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, ScrollView, StyleSheet, Text, View } from "react-native";
+import {
+  Alert,
+  Button,
+  Linking,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
 import { addMatchToCalendar } from "../../../src/utils/calendarExport";
@@ -33,7 +42,7 @@ type Match = {
   rsvpDeadline?: any;
   description?: string;
 
-  // ✅ maintained by Cloud Function
+  // maintained by Cloud Function
   confirmedYesCount?: number;
   waitlistCount?: number;
 };
@@ -59,6 +68,49 @@ function paramToString(v: any): string | null {
   return String(v);
 }
 
+function clamp(n: number, lo: number, hi: number) {
+  return Math.max(lo, Math.min(hi, n));
+}
+
+function formatCountdown(ms: number) {
+  if (!Number.isFinite(ms)) return "";
+  const sign = ms < 0 ? -1 : 1;
+  const abs = Math.abs(ms);
+
+  const sec = Math.floor(abs / 1000);
+  const min = Math.floor(sec / 60);
+  const hr = Math.floor(min / 60);
+  const day = Math.floor(hr / 24);
+
+  const remHr = hr % 24;
+  const remMin = min % 60;
+
+  const parts: string[] = [];
+  if (day > 0) parts.push(`${day}d`);
+  if (remHr > 0) parts.push(`${remHr}h`);
+  if (day === 0 && remMin > 0) parts.push(`${remMin}m`);
+  if (parts.length === 0) parts.push("0m");
+
+  return (sign < 0 ? "-" : "") + parts.join(" ");
+}
+
+async function openInMaps(queryText: string) {
+  const q = encodeURIComponent(queryText);
+
+  // Prefer Google Maps on Android; Apple Maps on iOS
+  const url =
+    Platform.OS === "ios"
+      ? `http://maps.apple.com/?q=${q}`
+      : `https://www.google.com/maps/search/?api=1&query=${q}`;
+
+  const can = await Linking.canOpenURL(url);
+  if (!can) {
+    Alert.alert("Couldn’t open Maps");
+    return;
+  }
+  await Linking.openURL(url);
+}
+
 export default function MatchDetailScreen() {
   const params = useLocalSearchParams();
   const matchIdStr = paramToString(params?.matchId);
@@ -74,8 +126,16 @@ export default function MatchDetailScreen() {
   const [exportingCalendar, setExportingCalendar] = useState(false);
   const [savingRsvp, setSavingRsvp] = useState(false);
 
+  // tick for countdown updates
+  const [nowTick, setNowTick] = useState(Date.now());
+
   // only for on-screen "you got promoted" alert
   const prevWaitlistedRef = useRef<boolean | null>(null);
+
+  useEffect(() => {
+    const t = setInterval(() => setNowTick(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
 
   // Live subscribe: match + RSVPs
   useEffect(() => {
@@ -158,11 +218,16 @@ export default function MatchDetailScreen() {
   const isCancelled = statusLabel === "cancelled" || statusLabel === "canceled";
   const isPlayed = statusLabel === "played";
 
+  const startAt = useMemo(() => toDate(match?.startDateTime), [match?.startDateTime]);
+  const deadlineAt = useMemo(
+    () => (match?.rsvpDeadline ? toDate(match.rsvpDeadline) : null),
+    [match?.rsvpDeadline]
+  );
+
   const isRsvpClosed = useMemo(() => {
-    if (!match?.rsvpDeadline) return false;
-    const deadline = toDate(match.rsvpDeadline);
-    return new Date() > deadline;
-  }, [match?.rsvpDeadline]);
+    if (!deadlineAt) return false;
+    return nowTick > deadlineAt.getTime();
+  }, [deadlineAt, nowTick]);
 
   const rsvpDisabledReason =
     isCancelled
@@ -173,10 +238,40 @@ export default function MatchDetailScreen() {
       ? "RSVP closed"
       : null;
 
+  const going = useMemo(
+    () => rsvps.filter((r) => r.status === "yes" && !r.isWaitlisted),
+    [rsvps]
+  );
+  const waitlist = useMemo(
+    () => rsvps.filter((r) => r.status === "yes" && r.isWaitlisted),
+    [rsvps]
+  );
+
+  const myRsvp = useMemo(() => rsvps.find((r) => r.userId === user?.uid), [rsvps, user?.uid]);
+  const userWaitlisted = myRsvp?.isWaitlisted ?? false;
+
+  const maxPlayers = Number(match?.maxPlayers ?? 0);
+  const spotsLeft = useMemo(() => {
+    if (!maxPlayers) return null;
+    return clamp(maxPlayers - going.length, 0, maxPlayers);
+  }, [maxPlayers, going.length]);
+
+  const startMs = startAt.getTime() - nowTick;
+  const deadlineMs = deadlineAt ? deadlineAt.getTime() - nowTick : null;
+
+  const startLabel =
+    startMs >= 0 ? `Starts in ${formatCountdown(startMs)}` : `Started ${formatCountdown(-startMs)} ago`;
+
+  const rsvpLabel = deadlineAt
+    ? deadlineMs !== null && deadlineMs >= 0
+      ? `RSVP closes in ${formatCountdown(deadlineMs)}`
+      : `RSVP closed (${deadlineAt.toLocaleString()})`
+    : "No RSVP deadline";
+
   const handleRsvp = async (status: RsvpStatus) => {
     if (!user || !matchIdStr) return;
 
-    // ✅ allow NO even when RSVP is closed / cancelled / played
+    // allow NO even when RSVP is closed / cancelled / played
     if (rsvpDisabledReason && status !== "no") {
       Alert.alert(rsvpDisabledReason);
       return;
@@ -197,11 +292,11 @@ export default function MatchDetailScreen() {
       }
 
       const matchData = matchSnap.data() as any;
-      const maxPlayers: number = Number(matchData.maxPlayers ?? 0);
+      const maxPlayersFresh: number = Number(matchData.maxPlayers ?? 0);
 
       const matchStatus = String(matchData.status ?? "scheduled").toLowerCase();
 
-      // ✅ If cancelling/played, still allow user to set NO (withdraw), but block YES/MAYBE
+      // If cancelling/played, still allow user to set NO (withdraw), but block YES/MAYBE
       if ((matchStatus === "cancelled" || matchStatus === "canceled") && status !== "no") {
         Alert.alert("Match cancelled", "You can’t RSVP YES/MAYBE for a cancelled match.");
         return;
@@ -211,7 +306,7 @@ export default function MatchDetailScreen() {
         return;
       }
 
-      // ✅ If deadline passed, still allow NO but block YES/MAYBE
+      // If deadline passed, still allow NO but block YES/MAYBE
       if (matchData.rsvpDeadline) {
         const deadline = toDate(matchData.rsvpDeadline);
         if (new Date() > deadline && status !== "no") {
@@ -225,12 +320,12 @@ export default function MatchDetailScreen() {
 
       // Determine waitlist flag without heavy queries
       let isWaitlisted = false;
-      if (status === "yes" && maxPlayers > 0) {
+      if (status === "yes" && maxPlayersFresh > 0) {
         const confirmedFromMatch = Number(matchData.confirmedYesCount);
         const localConfirmed = rsvps.filter((r) => r.status === "yes" && !r.isWaitlisted).length;
 
         const confirmed = Number.isFinite(confirmedFromMatch) ? confirmedFromMatch : localConfirmed;
-        isWaitlisted = confirmed >= maxPlayers;
+        isWaitlisted = confirmed >= maxPlayersFresh;
       }
 
       // If leaving, never be waitlisted
@@ -298,14 +393,10 @@ export default function MatchDetailScreen() {
   };
 
   const confirmRemoveRsvp = () => {
-    Alert.alert(
-      "Remove RSVP?",
-      "This will delete your RSVP record for this match.",
-      [
-        { text: "Cancel", style: "cancel" },
-        { text: "Remove", style: "destructive", onPress: () => void removeRsvpDoc() },
-      ]
-    );
+    Alert.alert("Remove RSVP?", "This will delete your RSVP record for this match.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Remove", style: "destructive", onPress: () => void removeRsvpDoc() },
+    ]);
   };
 
   const setMatchStatus = async (nextStatus: "scheduled" | "played" | "cancelled") => {
@@ -333,12 +424,9 @@ export default function MatchDetailScreen() {
     try {
       setExportingCalendar(true);
 
-      const startAt = toDate(match.startDateTime);
       const endAt = new Date(startAt.getTime() + 90 * 60 * 1000);
 
-      const deadlineText = match.rsvpDeadline
-        ? `RSVP deadline: ${toDate(match.rsvpDeadline).toLocaleString()}`
-        : "";
+      const deadlineText = deadlineAt ? `RSVP deadline: ${deadlineAt.toLocaleString()}` : "";
 
       const notes = [
         "Pickup soccer match",
@@ -387,14 +475,6 @@ export default function MatchDetailScreen() {
     );
   }
 
-  const date = toDate(match.startDateTime);
-
-  const going = rsvps.filter((r) => r.status === "yes" && !r.isWaitlisted);
-  const waitlist = rsvps.filter((r) => r.status === "yes" && r.isWaitlisted);
-
-  const myRsvp = rsvps.find((r) => r.userId === user?.uid);
-  const userWaitlisted = myRsvp?.isWaitlisted ?? false;
-
   const statusText =
     statusLabel === "played"
       ? "Played"
@@ -405,16 +485,30 @@ export default function MatchDetailScreen() {
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.title}>
-        {date.toLocaleDateString()}{" "}
-        {date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+        {startAt.toLocaleDateString()}{" "}
+        {startAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
       </Text>
+
+      <Text style={styles.subtle}>{startLabel}</Text>
+      <Text style={styles.subtle}>{rsvpLabel}</Text>
 
       {!!match.locationText && <Text style={styles.location}>{match.locationText}</Text>}
 
-      {!!match.description && <Text style={styles.description}>{match.description}</Text>}
+      {!!match.description?.trim() && (
+        <View style={{ marginTop: 10 }}>
+          <Text style={styles.sectionTitle}>Notes</Text>
+          <Text style={styles.description}>{match.description.trim()}</Text>
+        </View>
+      )}
 
-      <View style={{ marginTop: 10 }}>
+      <View style={{ marginTop: 12, flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         <Text style={styles.statusPill}>Status: {statusText}</Text>
+        {isHost && <Text style={styles.hostPill}>👑 Host</Text>}
+        {maxPlayers > 0 && spotsLeft !== null && (
+          <Text style={spotsLeft === 0 ? styles.fullPill : styles.spotsPill}>
+            {spotsLeft === 0 ? "Full" : `${spotsLeft} spot${spotsLeft === 1 ? "" : "s"} left`}
+          </Text>
+        )}
       </View>
 
       <Text style={{ marginTop: 12 }}>
@@ -434,6 +528,12 @@ export default function MatchDetailScreen() {
         />
       </View>
 
+      {!!match.locationText?.trim() && (
+        <View style={{ marginTop: 10, alignSelf: "flex-start" }}>
+          <Button title="Open in Maps" onPress={() => openInMaps(match.locationText!.trim())} />
+        </View>
+      )}
+
       <Text style={styles.sectionTitle}>Your RSVP</Text>
       <View style={styles.rsvpRow}>
         {RSVP_STATUSES.map((s) => (
@@ -442,7 +542,7 @@ export default function MatchDetailScreen() {
             title={s.toUpperCase()}
             color={userStatus === s ? "#007AFF" : "#aaa"}
             onPress={() => handleRsvp(s)}
-            // ✅ allow "NO" even when disabled; block YES/MAYBE
+            // allow "NO" even when disabled; block YES/MAYBE
             disabled={savingRsvp || (!!rsvpDisabledReason && s !== "no")}
           />
         ))}
@@ -460,7 +560,6 @@ export default function MatchDetailScreen() {
           : "Tap YES, MAYBE, or NO to update your status."}
       </Text>
 
-      {/* ✅ Leave / Remove controls */}
       {!!myRsvp && (
         <View style={{ marginTop: 10 }}>
           <Button
@@ -532,27 +631,60 @@ export default function MatchDetailScreen() {
 const styles = StyleSheet.create({
   container: { padding: 16 },
   title: { fontSize: 20, fontWeight: "bold" },
-  location: { marginTop: 4, color: "#666" },
-  description: { marginTop: 8, color: "#444" },
-  sectionTitle: { marginTop: 16, fontWeight: "600" },
+
+  subtle: { marginTop: 4, color: "#666" },
+
+  location: { marginTop: 10, color: "#444" },
+
+  sectionTitle: { marginTop: 16, fontWeight: "700" },
+  description: { marginTop: 6, color: "#444", lineHeight: 18 },
+
   rsvpRow: {
     flexDirection: "row",
     justifyContent: "space-around",
     marginTop: 8,
   },
+
   userStatusNote: {
     marginTop: 8,
     textAlign: "center",
     color: "#555",
     fontSize: 13,
   },
+
   statusPill: {
-    alignSelf: "flex-start",
     paddingHorizontal: 10,
     paddingVertical: 4,
     borderRadius: 999,
     backgroundColor: "#E6F4FF",
     fontSize: 12,
-    fontWeight: "600",
+    fontWeight: "700",
+  },
+
+  hostPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: "#FFF3CD",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+
+  spotsPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: "#DFF7E3",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+
+  fullPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: "#FFE7B8",
+    fontSize: 12,
+    fontWeight: "700",
   },
 });

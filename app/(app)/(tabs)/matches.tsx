@@ -8,7 +8,7 @@ import {
   query,
   where,
 } from "firebase/firestore";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   Button,
   FlatList,
@@ -54,6 +54,25 @@ function toDate(raw: any): Date {
 
 function normalizeStatus(s?: string) {
   return (s ?? "scheduled").toLowerCase();
+}
+
+function formatCountdown(ms: number) {
+  const abs = Math.abs(ms);
+  const sec = Math.floor(abs / 1000);
+  const min = Math.floor(sec / 60);
+  const hr = Math.floor(min / 60);
+  const day = Math.floor(hr / 24);
+
+  const remHr = hr % 24;
+  const remMin = min % 60;
+
+  const parts: string[] = [];
+  if (day > 0) parts.push(`${day}d`);
+  if (remHr > 0) parts.push(`${remHr}h`);
+  if (day === 0 && remMin > 0) parts.push(`${remMin}m`);
+  if (parts.length === 0) parts.push("0m");
+
+  return parts.join(" ");
 }
 
 function getChip(match: Match) {
@@ -216,7 +235,7 @@ export default function MatchesScreen() {
 
   // 4) Subscribe to MY RSVPs (to show per-match badge)
   useEffect(() => {
-    if (!user?.uid || !teamId) {
+    if (!user?.uid) {
       setMyRsvpByMatchId({});
       return;
     }
@@ -247,9 +266,7 @@ export default function MatchesScreen() {
     );
 
     return () => unsub();
-  }, [user?.uid, teamId]);
-
-  const matchesWithMyRsvp = useMemo(() => matches, [matches]);
+  }, [user?.uid]);
 
   const renderItem = ({ item }: { item: Match }) => {
     const date = toDate(item.startDateTime);
@@ -264,6 +281,16 @@ export default function MatchesScreen() {
     const myBadge = getMyRsvpBadge(myRsvp);
 
     const desc = (item.description ?? "").trim();
+
+    const msUntilStart = date.getTime() - Date.now();
+    const startHint =
+      normalizeStatus(item.status) === "played" ||
+      normalizeStatus(item.status) === "cancelled" ||
+      normalizeStatus(item.status) === "canceled"
+        ? null
+        : msUntilStart >= 0
+        ? `Starts in ${formatCountdown(msUntilStart)}`
+        : "In progress / started";
 
     return (
       <TouchableOpacity
@@ -286,20 +313,22 @@ export default function MatchesScreen() {
           </View>
         </View>
 
-        {!!item.locationText && (
-          <Text style={styles.location}>{item.locationText}</Text>
-        )}
+        {!!startHint && <Text style={styles.startHint}>{startHint}</Text>}
 
-        {!!desc && <Text style={styles.desc} numberOfLines={2}>{desc}</Text>}
+        {!!item.locationText && <Text style={styles.location}>{item.locationText}</Text>}
+
+        {!!desc && (
+          <Text style={styles.desc} numberOfLines={2}>
+            {desc}
+          </Text>
+        )}
 
         <View style={styles.metaRow}>
           <Text style={styles.subtitle}>
             {confirmed}/{max || "?"} going
           </Text>
 
-          {waitlist > 0 && (
-            <Text style={styles.waitlistText}>⏳ {waitlist} waitlist</Text>
-          )}
+          {waitlist > 0 && <Text style={styles.waitlistText}>⏳ {waitlist} waitlist</Text>}
 
           {!!myBadge && (
             <View style={[styles.myBadge, (styles as any)[`myBadge_${myBadge.variant}`]]}>
@@ -328,10 +357,7 @@ export default function MatchesScreen() {
         <Text style={styles.noTeamSub}>
           Join or create a team in the Teams tab to see and create matches.
         </Text>
-        <Button
-          title="Go to Teams"
-          onPress={() => router.push("/(app)/(tabs)/teams")}
-        />
+        <Button title="Go to Teams" onPress={() => router.push("/(app)/(tabs)/teams")} />
       </View>
     );
   }
@@ -340,22 +366,17 @@ export default function MatchesScreen() {
     <View style={styles.container}>
       <Text style={styles.teamTag}>Team: {teamName ?? teamId}</Text>
 
-      <Button
-        title="Create Match"
-        onPress={() => router.push("/(app)/match/create")}
-      />
+      <Button title="Create Match" onPress={() => router.push("/(app)/match/create")} />
 
       <FlatList
-        data={matchesWithMyRsvp}
+        data={matches}
         keyExtractor={(item) => item.id}
         renderItem={renderItem}
         contentContainerStyle={{ paddingVertical: 12 }}
       />
 
-      {matchesWithMyRsvp.length === 0 && (
-        <Text style={{ marginTop: 16, textAlign: "center" }}>
-          No matches yet. Create one!
-        </Text>
+      {matches.length === 0 && (
+        <Text style={{ marginTop: 16, textAlign: "center" }}>No matches yet. Create one!</Text>
       )}
     </View>
   );
@@ -391,6 +412,8 @@ const styles = StyleSheet.create({
   },
 
   title: { fontWeight: "bold", flex: 1 },
+  startHint: { marginTop: 6, color: "#666" },
+
   location: { marginTop: 6, color: "#555" },
 
   desc: {
