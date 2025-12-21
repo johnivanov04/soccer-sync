@@ -465,6 +465,14 @@ export default function MatchDetailScreen() {
     }
   };
 
+  const handleOpenChat = () => {
+    if (!matchIdStr) return;
+    router.push({
+      pathname: "/(app)/match/chat/[matchId]",
+      params: { matchId: String(matchIdStr) },
+    });
+  };
+
   const renderScroll = (children: React.ReactNode) => {
     return (
       <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -545,6 +553,11 @@ export default function MatchDetailScreen() {
           <Button title="Open in Maps" onPress={() => openInMaps(match.locationText!.trim())} />
         </View>
       )}
+
+      {/* ✅ Match Chat button */}
+      <View style={{ marginTop: 10, alignSelf: "flex-start" }}>
+        <Button title="Open Match Chat" onPress={handleOpenChat} />
+      </View>
 
       <Text style={styles.sectionTitle}>Your RSVP</Text>
       <View style={styles.rsvpRow}>
