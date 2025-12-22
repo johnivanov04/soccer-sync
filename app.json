@@ -12,7 +12,8 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.jivanov0.soccersyncmobile",
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSPhotoLibraryUsageDescription": "Allow SoccerSync to access your photo library to set a profile picture."
       }
     },
     "android": {
@@ -46,6 +47,12 @@
           "dark": {
             "backgroundColor": "#000000"
           }
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow SoccerSync to access your photo library to set a profile picture."
         }
       ],
       [
