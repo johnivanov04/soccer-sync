@@ -63,7 +63,6 @@ export default function ProfileScreen() {
 
           setTeamId(data.teamId ?? null);
 
-          // ✅ profile photo fields
           const url = (data.photoURL as string) ?? user.photoURL ?? null;
           setPhotoURL(url);
 
@@ -98,7 +97,6 @@ export default function ProfileScreen() {
     try {
       setSaving(true);
 
-      // ✅ update Firestore
       const userRef = doc(db, "users", user.uid);
       await setDoc(
         userRef,
@@ -109,7 +107,6 @@ export default function ProfileScreen() {
         { merge: true }
       );
 
-      // ✅ (optional but nice) update Firebase Auth profile too
       try {
         const current = auth.currentUser;
         if (current) await updateProfile(current, { displayName: trimmed });
@@ -129,9 +126,9 @@ export default function ProfileScreen() {
   const handlePickPhoto = async () => {
     if (!user?.uid) return;
 
-    try {
-      setUploadingPhoto(true);
+    setUploadingPhoto(true);
 
+    try {
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!perm.granted) {
         Alert.alert(
@@ -153,22 +150,19 @@ export default function ProfileScreen() {
       const asset = result.assets?.[0];
       if (!asset?.uri) return;
 
-      // Convert to blob
       const response = await fetch(asset.uri);
       const blob = await response.blob();
 
-      // store under avatars/{uid}/{timestamp}.jpg
       const fileName = `${Date.now()}.jpg`;
       const newPath = `avatars/${user.uid}/${fileName}`;
       const storageRef = ref(storage, newPath);
 
       await uploadBytes(storageRef, blob, {
-        contentType: "image/jpeg",
+        contentType: blob.type || "image/jpeg",
       });
 
       const url = await getDownloadURL(storageRef);
 
-      // Save to Firestore user doc
       const userRef = doc(db, "users", user.uid);
       await setDoc(
         userRef,
@@ -180,7 +174,6 @@ export default function ProfileScreen() {
         { merge: true }
       );
 
-      // Update Firebase Auth profile too (optional)
       try {
         const current = auth.currentUser;
         if (current) await updateProfile(current, { photoURL: url });
@@ -188,12 +181,10 @@ export default function ProfileScreen() {
         console.warn("Could not update auth photoURL", e);
       }
 
-      // Attempt to delete old photo (optional cleanup)
       if (photoPath && photoPath !== newPath) {
         try {
           await deleteObject(ref(storage, photoPath));
         } catch (e) {
-          // Not fatal if delete fails (rules or missing file)
           console.warn("Old avatar delete failed (ok)", e);
         }
       }
@@ -202,9 +193,28 @@ export default function ProfileScreen() {
       setPhotoPath(newPath);
 
       Alert.alert("Updated", "Your profile picture has been updated.");
-    } catch (err) {
-      console.error("Photo upload failed", err);
-      Alert.alert("Error", "Could not update profile picture. Try again.");
+    } catch (err: any) {
+      // ✅ STEP 0: dump non-enumerable Firebase error fields too
+      console.error("Photo upload failed (raw):", err);
+      try {
+        console.error(
+          "err props:",
+          JSON.stringify(err, Object.getOwnPropertyNames(err), 2)
+        );
+      } catch (e) {
+        console.warn("Could not stringify error props", e);
+      }
+
+      // ✅ existing diagnostics
+      console.error("code:", err?.code);
+      console.error("message:", err?.message);
+      console.error("serverResponse:", err?.serverResponse);
+      console.error("customData:", err?.customData);
+
+      Alert.alert(
+        "Upload failed",
+        err?.message ?? "Could not update profile picture. Try again."
+      );
     } finally {
       setUploadingPhoto(false);
     }
@@ -230,7 +240,6 @@ export default function ProfileScreen() {
     <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.header}>Your Profile</Text>
 
-      {/* Avatar section */}
       <View style={styles.avatarRow}>
         <View style={styles.avatarWrap}>
           {photoURL ? (
@@ -296,16 +305,13 @@ export default function ProfileScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    padding: 20,
-  },
+  container: { padding: 20 },
   header: {
     fontSize: 22,
     fontWeight: "700",
     marginBottom: 18,
     textAlign: "center",
   },
-
   avatarRow: {
     flexDirection: "row",
     gap: 14,
@@ -320,29 +326,15 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#ddd",
   },
-  avatar: {
-    width: 86,
-    height: 86,
-    borderRadius: 43,
-  },
+  avatar: { width: 86, height: 86, borderRadius: 43 },
   avatarFallback: {
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#eef3ff",
   },
-  avatarInitials: {
-    fontSize: 26,
-    fontWeight: "800",
-    color: "#2b4cff",
-  },
-  bigName: {
-    fontSize: 18,
-    fontWeight: "700",
-  },
-  subText: {
-    marginTop: 2,
-    color: "#666",
-  },
+  avatarInitials: { fontSize: 26, fontWeight: "800", color: "#2b4cff" },
+  bigName: { fontSize: 18, fontWeight: "700" },
+  subText: { marginTop: 2, color: "#666" },
   photoButton: {
     alignSelf: "flex-start",
     paddingVertical: 8,
@@ -352,11 +344,7 @@ const styles = StyleSheet.create({
     borderColor: "#cfd7ff",
     backgroundColor: "#f3f6ff",
   },
-  photoButtonText: {
-    fontWeight: "700",
-    color: "#2b4cff",
-  },
-
+  photoButtonText: { fontWeight: "700", color: "#2b4cff" },
   card: {
     padding: 14,
     borderRadius: 12,
@@ -364,15 +352,8 @@ const styles = StyleSheet.create({
     borderColor: "#ddd",
     backgroundColor: "#fff",
   },
-  label: {
-    marginTop: 10,
-    fontSize: 13,
-    color: "#666",
-  },
-  value: {
-    fontSize: 16,
-    marginTop: 4,
-  },
+  label: { marginTop: 10, fontSize: 13, color: "#666" },
+  value: { fontSize: 16, marginTop: 4 },
   input: {
     borderWidth: 1,
     borderColor: "#ccc",
