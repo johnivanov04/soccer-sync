@@ -98,7 +98,6 @@ function formatCountdown(ms: number) {
 async function openInMaps(queryText: string) {
   const q = encodeURIComponent(queryText);
 
-  // Prefer Google Maps on Android; Apple Maps on iOS
   const url =
     Platform.OS === "ios"
       ? `http://maps.apple.com/?q=${q}`
@@ -184,8 +183,6 @@ export default function MatchDetailScreen() {
           const nowWaitlisted =
             (mine?.status === "yes" && (mine?.isWaitlisted ?? false)) ?? false;
 
-          // If you were waitlisted and now you're confirmed while viewing the screen,
-          // show an in-app alert (Cloud Function will also send a push).
           if (prevWaitlistedRef.current !== null) {
             if (
               prevWaitlistedRef.current === true &&
@@ -274,10 +271,17 @@ export default function MatchDetailScreen() {
       : `RSVP closed (${deadlineAt.toLocaleString()})`
     : "No RSVP deadline";
 
+  const handleOpenChat = () => {
+    if (!matchIdStr) return;
+    router.push({
+      pathname: "/(app)/match/chat/[matchId]",
+      params: { matchId: String(matchIdStr) },
+    });
+  };
+
   const handleRsvp = async (status: RsvpStatus) => {
     if (!user || !matchIdStr) return;
 
-    // allow NO even when RSVP is closed / cancelled / played
     if (rsvpDisabledReason && status !== "no") {
       Alert.alert(rsvpDisabledReason);
       return;
@@ -288,7 +292,6 @@ export default function MatchDetailScreen() {
     try {
       setSavingRsvp(true);
 
-      // Always read match fresh for maxPlayers/status/deadline
       const matchRef = doc(db, "matches", matchIdStr);
       const matchSnap = await getDoc(matchRef);
 
@@ -302,7 +305,6 @@ export default function MatchDetailScreen() {
 
       const matchStatus = String(matchData.status ?? "scheduled").toLowerCase();
 
-      // If cancelling/played, still allow user to set NO (withdraw), but block YES/MAYBE
       if ((matchStatus === "cancelled" || matchStatus === "canceled") && status !== "no") {
         Alert.alert("Match cancelled", "You can’t RSVP YES/MAYBE for a cancelled match.");
         return;
@@ -312,7 +314,6 @@ export default function MatchDetailScreen() {
         return;
       }
 
-      // If deadline passed, still allow NO but block YES/MAYBE
       if (matchData.rsvpDeadline) {
         const deadline = toDate(matchData.rsvpDeadline);
         if (new Date() > deadline && status !== "no") {
@@ -324,7 +325,6 @@ export default function MatchDetailScreen() {
         }
       }
 
-      // Determine waitlist flag without heavy queries
       let isWaitlisted = false;
       if (status === "yes" && maxPlayersFresh > 0) {
         const confirmedFromMatch = Number(matchData.confirmedYesCount);
@@ -334,10 +334,8 @@ export default function MatchDetailScreen() {
         isWaitlisted = confirmed >= maxPlayersFresh;
       }
 
-      // If leaving, never be waitlisted
       if (status === "no") isWaitlisted = false;
 
-      // Load displayName best-effort
       let playerName = user.email ?? user.uid;
       try {
         const userDocRef = doc(db, "users", user.uid);
@@ -350,7 +348,6 @@ export default function MatchDetailScreen() {
         console.warn("Could not load user profile for RSVP", innerErr);
       }
 
-      // Overwrite to avoid “extra field” rule failures
       const rsvpRef = doc(db, "rsvps", rsvpId);
       await setDoc(rsvpRef, {
         matchId: matchIdStr,
@@ -387,7 +384,6 @@ export default function MatchDetailScreen() {
       setSavingRsvp(true);
       await deleteDoc(rsvpRef);
 
-      // local UI cleanup (snapshots will also update shortly)
       setUserStatus(null);
       prevWaitlistedRef.current = null;
     } catch (e) {
@@ -465,14 +461,6 @@ export default function MatchDetailScreen() {
     }
   };
 
-  const handleOpenChat = () => {
-    if (!matchIdStr) return;
-    router.push({
-      pathname: "/(app)/match/chat/[matchId]",
-      params: { matchId: String(matchIdStr) },
-    });
-  };
-
   const renderScroll = (children: React.ReactNode) => {
     return (
       <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -540,6 +528,7 @@ export default function MatchDetailScreen() {
         <Text style={{ marginTop: 8, color: "#a00" }}>{rsvpDisabledReason}</Text>
       )}
 
+      {/* Actions */}
       <View style={{ marginTop: 12, alignSelf: "flex-start" }}>
         <Button
           title={exportingCalendar ? "Opening calendar..." : "Add to Calendar"}
@@ -554,7 +543,7 @@ export default function MatchDetailScreen() {
         </View>
       )}
 
-      {/* ✅ Match Chat button */}
+      {/* ✅ NEW: Match Chat entry point */}
       <View style={{ marginTop: 10, alignSelf: "flex-start" }}>
         <Button title="Open Match Chat" onPress={handleOpenChat} />
       </View>
@@ -567,7 +556,6 @@ export default function MatchDetailScreen() {
             title={s.toUpperCase()}
             color={userStatus === s ? "#007AFF" : "#aaa"}
             onPress={() => handleRsvp(s)}
-            // allow "NO" even when disabled; block YES/MAYBE
             disabled={savingRsvp || (!!rsvpDisabledReason && s !== "no")}
           />
         ))}
