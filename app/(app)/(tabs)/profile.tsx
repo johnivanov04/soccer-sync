@@ -15,7 +15,17 @@ import {
 } from "react-native";
 
 import { updateProfile } from "firebase/auth";
-import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  serverTimestamp,
+  setDoc,
+  where,
+  writeBatch,
+} from "firebase/firestore";
 import { deleteObject, getDownloadURL, ref, uploadBytes } from "firebase/storage";
 
 import { useAuth } from "../../../src/context/AuthContext";
@@ -123,6 +133,40 @@ export default function ProfileScreen() {
     }
   };
 
+  // ✅ Option B: after a profile pic change, update all existing RSVP docs for this user
+  const backfillRsvpPhotoURL = async (newUrl: string) => {
+    if (!user?.uid) return 0;
+
+    const rsvpsCol = collection(db, "rsvps");
+    const q1 = query(rsvpsCol, where("userId", "==", user.uid));
+    const snap = await getDocs(q1);
+
+    if (snap.empty) return 0;
+
+    const docs = snap.docs;
+
+    // Firestore batches are limited (500 ops). Use chunks to be safe.
+    const CHUNK = 450;
+    let updated = 0;
+
+    for (let i = 0; i < docs.length; i += CHUNK) {
+      const batch = writeBatch(db);
+      const slice = docs.slice(i, i + CHUNK);
+
+      for (const d of slice) {
+        batch.update(d.ref, {
+          photoURL: newUrl,
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      await batch.commit();
+      updated += slice.length;
+    }
+
+    return updated;
+  };
+
   const handlePickPhoto = async () => {
     if (!user?.uid) return;
 
@@ -139,7 +183,7 @@ export default function ProfileScreen() {
       }
 
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        mediaTypes: ImagePicker.MediaTypeOptions.Images, // ✅ new API (no deprecation warning)
         allowsEditing: true,
         aspect: [1, 1],
         quality: 0.85,
@@ -163,6 +207,7 @@ export default function ProfileScreen() {
 
       const url = await getDownloadURL(storageRef);
 
+      // Save to Firestore user doc
       const userRef = doc(db, "users", user.uid);
       await setDoc(
         userRef,
@@ -174,6 +219,7 @@ export default function ProfileScreen() {
         { merge: true }
       );
 
+      // Update Firebase Auth profile too (optional)
       try {
         const current = auth.currentUser;
         if (current) await updateProfile(current, { photoURL: url });
@@ -181,6 +227,20 @@ export default function ProfileScreen() {
         console.warn("Could not update auth photoURL", e);
       }
 
+      // ✅ Backfill existing RSVP docs so matches you already RSVPed for start showing your new photo
+      try {
+        const n = await backfillRsvpPhotoURL(url);
+        console.log(`✅ Backfilled photoURL on ${n} RSVP docs`);
+      } catch (e) {
+        // If this fails, it’s almost always Firestore rules not allowing RSVP photoURL updates
+        console.warn("⚠️ RSVP backfill failed (photo still updated):", e);
+        Alert.alert(
+          "Photo updated",
+          "Your profile picture was updated, but older RSVPs couldn't be updated. If photos don't show everywhere, we may need to tweak Firestore rules for RSVP photo updates."
+        );
+      }
+
+      // Attempt to delete old photo (optional cleanup)
       if (photoPath && photoPath !== newPath) {
         try {
           await deleteObject(ref(storage, photoPath));
@@ -194,7 +254,6 @@ export default function ProfileScreen() {
 
       Alert.alert("Updated", "Your profile picture has been updated.");
     } catch (err: any) {
-      // ✅ STEP 0: dump non-enumerable Firebase error fields too
       console.error("Photo upload failed (raw):", err);
       try {
         console.error(
@@ -205,7 +264,6 @@ export default function ProfileScreen() {
         console.warn("Could not stringify error props", e);
       }
 
-      // ✅ existing diagnostics
       console.error("code:", err?.code);
       console.error("message:", err?.message);
       console.error("serverResponse:", err?.serverResponse);
