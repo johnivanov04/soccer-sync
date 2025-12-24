@@ -1,4 +1,5 @@
 // app/(app)/match/[matchId].tsx
+import { Image } from "expo-image";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import {
   collection,
@@ -55,6 +56,10 @@ type Rsvp = {
   status?: RsvpStatus;
   isWaitlisted?: boolean;
   updatedAt?: any;
+
+  // ✅ new fields for avatars (stored on RSVP doc so teammates can read)
+  photoURL?: string | null;
+  photoVersion?: number | null;
 };
 
 function toDate(raw: any): Date {
@@ -109,6 +114,57 @@ async function openInMaps(queryText: string) {
     return;
   }
   await Linking.openURL(url);
+}
+
+function initialsFromName(name?: string | null) {
+  const base = (name ?? "").trim();
+  if (!base) return "U";
+  const parts = base.split(" ").filter(Boolean);
+  const first = parts[0]?.[0] ?? "U";
+  const last = parts.length > 1 ? parts[parts.length - 1]?.[0] : "";
+  return (first + last).toUpperCase();
+}
+
+function avatarUri(photoURL?: string | null, photoVersion?: number | null) {
+  if (!photoURL) return null;
+  const v = Number.isFinite(photoVersion as any) ? String(photoVersion) : "0";
+  return photoURL.includes("?") ? `${photoURL}&v=${v}` : `${photoURL}?v=${v}`;
+}
+
+function PersonRow({
+  name,
+  subtitle,
+  photoURL,
+  photoVersion,
+  highlight,
+}: {
+  name: string;
+  subtitle?: string;
+  photoURL?: string | null;
+  photoVersion?: number | null;
+  highlight?: boolean;
+}) {
+  const uri = avatarUri(photoURL, photoVersion);
+  const initials = initialsFromName(name);
+
+  return (
+    <View style={[styles.personRow, highlight && styles.personRowHighlight]}>
+      <View style={styles.avatarSmWrap}>
+        {uri ? (
+          <Image source={{ uri }} style={styles.avatarSm} />
+        ) : (
+          <View style={[styles.avatarSm, styles.avatarSmFallback]}>
+            <Text style={styles.avatarSmText}>{initials}</Text>
+          </View>
+        )}
+      </View>
+
+      <View style={{ flex: 1 }}>
+        <Text style={styles.personName}>{name}</Text>
+        {!!subtitle && <Text style={styles.personSub}>{subtitle}</Text>}
+      </View>
+    </View>
+  );
 }
 
 export default function MatchDetailScreen() {
@@ -171,6 +227,11 @@ export default function MatchDetailScreen() {
             status: data.status as RsvpStatus,
             isWaitlisted: data.isWaitlisted ?? false,
             updatedAt: data.updatedAt,
+
+            // ✅ new avatar fields (may be missing on older RSVPs)
+            photoURL: data.photoURL ?? null,
+            photoVersion:
+              typeof data.photoVersion === "number" ? data.photoVersion : null,
           };
         });
 
@@ -244,6 +305,26 @@ export default function MatchDetailScreen() {
     () => rsvps.filter((r) => r.status === "yes" && r.isWaitlisted),
     [rsvps]
   );
+
+  const goingSorted = useMemo(() => {
+    const copy = [...going];
+    copy.sort((a, b) =>
+      String(a.playerName ?? a.userId ?? "").localeCompare(
+        String(b.playerName ?? b.userId ?? "")
+      )
+    );
+    return copy;
+  }, [going]);
+
+  const waitlistSorted = useMemo(() => {
+    const copy = [...waitlist];
+    copy.sort((a, b) =>
+      String(a.playerName ?? a.userId ?? "").localeCompare(
+        String(b.playerName ?? b.userId ?? "")
+      )
+    );
+    return copy;
+  }, [waitlist]);
 
   const myRsvp = useMemo(
     () => rsvps.find((r) => r.userId === user?.uid),
@@ -336,13 +417,28 @@ export default function MatchDetailScreen() {
 
       if (status === "no") isWaitlisted = false;
 
+      // ✅ name + avatar fields come from *your own* user doc (allowed by rules)
       let playerName = user.email ?? user.uid;
+      let myPhotoURL: string | null = user.photoURL ?? null;
+      let photoVersion: number | null = null;
+
       try {
         const userDocRef = doc(db, "users", user.uid);
         const userSnap = await getDoc(userDocRef);
         if (userSnap.exists()) {
           const data = userSnap.data() as any;
           if (data?.displayName) playerName = data.displayName;
+          if (data?.photoURL) myPhotoURL = data.photoURL;
+
+          // use updatedAt as a cache-busting version (ms)
+          const ms =
+            typeof data?.updatedAt?.toMillis === "function"
+              ? data.updatedAt.toMillis()
+              : typeof data?.updatedAt?.toDate === "function"
+              ? data.updatedAt.toDate().getTime()
+              : null;
+
+          if (typeof ms === "number" && Number.isFinite(ms)) photoVersion = ms;
         }
       } catch (innerErr) {
         console.warn("Could not load user profile for RSVP", innerErr);
@@ -355,6 +451,11 @@ export default function MatchDetailScreen() {
         playerName,
         status,
         isWaitlisted,
+
+        // ✅ store avatar info on RSVP doc (so teammates can render it)
+        photoURL: myPhotoURL,
+        photoVersion,
+
         updatedAt: serverTimestamp(),
       });
 
@@ -543,7 +644,7 @@ export default function MatchDetailScreen() {
         </View>
       )}
 
-      {/* ✅ NEW: Match Chat entry point */}
+      {/* Match Chat entry point */}
       <View style={{ marginTop: 10, alignSelf: "flex-start" }}>
         <Button title="Open Match Chat" onPress={handleOpenChat} />
       </View>
@@ -590,18 +691,42 @@ export default function MatchDetailScreen() {
         </View>
       )}
 
+      {/* ✅ Avatars list */}
       <Text style={styles.sectionTitle}>Going</Text>
-      {going.length === 0 && <Text>No confirmed players yet.</Text>}
-      {going.map((r) => (
-        <Text key={r.id}>{r.playerName || r.userId}</Text>
-      ))}
+      {goingSorted.length === 0 && <Text>No confirmed players yet.</Text>}
+      {goingSorted.map((r) => {
+        const name = String(r.playerName || r.userId || "Unknown");
+        const subtitle =
+          r.userId && r.userId === match.createdBy ? "Host" : r.userId === user?.uid ? "You" : "";
+        return (
+          <PersonRow
+            key={r.id}
+            name={name}
+            subtitle={subtitle || undefined}
+            photoURL={r.photoURL ?? null}
+            photoVersion={r.photoVersion ?? null}
+            highlight={r.userId === user?.uid}
+          />
+        );
+      })}
 
-      {waitlist.length > 0 && (
+      {waitlistSorted.length > 0 && (
         <>
           <Text style={styles.sectionTitle}>Waitlist</Text>
-          {waitlist.map((r) => (
-            <Text key={r.id}>{r.playerName || r.userId}</Text>
-          ))}
+          {waitlistSorted.map((r) => {
+            const name = String(r.playerName || r.userId || "Unknown");
+            const subtitle = r.userId === user?.uid ? "You" : undefined;
+            return (
+              <PersonRow
+                key={r.id}
+                name={name}
+                subtitle={subtitle}
+                photoURL={r.photoURL ?? null}
+                photoVersion={r.photoVersion ?? null}
+                highlight={r.userId === user?.uid}
+              />
+            );
+          })}
         </>
       )}
 
@@ -700,5 +825,51 @@ const styles = StyleSheet.create({
     backgroundColor: "#FFE7B8",
     fontSize: 12,
     fontWeight: "700",
+  },
+
+  // ✅ Avatar list row styles
+  personRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#eee",
+  },
+  personRowHighlight: {
+    backgroundColor: "#f7faff",
+    borderRadius: 10,
+    paddingHorizontal: 8,
+  },
+  avatarSmWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: "#ddd",
+  },
+  avatarSm: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+  },
+  avatarSmFallback: {
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#eef3ff",
+  },
+  avatarSmText: {
+    fontWeight: "800",
+    color: "#2b4cff",
+  },
+  personName: {
+    fontSize: 15,
+    fontWeight: "700",
+  },
+  personSub: {
+    marginTop: 2,
+    fontSize: 12,
+    color: "#666",
   },
 });
