@@ -1,28 +1,30 @@
 // app/(app)/match/chat/[matchId].tsx
+import { Image } from "expo-image";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import {
-    addDoc,
-    collection,
-    doc,
-    getDoc,
-    onSnapshot,
-    orderBy,
-    query,
-    serverTimestamp,
-    where,
+  addDoc,
+  collection,
+  doc,
+  getDoc,
+  limit,
+  onSnapshot,
+  orderBy,
+  query,
+  serverTimestamp,
+  where,
 } from "firebase/firestore";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
-    Alert,
-    Button,
-    KeyboardAvoidingView,
-    Platform,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
+  Alert,
+  Button,
+  FlatList,
+  KeyboardAvoidingView,
+  Platform,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../../../../src/context/AuthContext";
@@ -35,6 +37,7 @@ type ChatMessage = {
   userId: string;
   displayName: string;
   text: string;
+  photoURL?: string | null;
   createdAt?: any;
 };
 
@@ -44,11 +47,32 @@ function paramToString(v: any): string | null {
   return String(v);
 }
 
+function toDate(raw: any): Date | null {
+  if (!raw) return null;
+  if (typeof raw?.toDate === "function") return raw.toDate();
+  const d = new Date(raw);
+  return Number.isFinite(d.getTime()) ? d : null;
+}
+
+function initialsFromName(name: string) {
+  const base = (name || "").trim();
+  if (!base) return "U";
+  const parts = base.split(" ").filter(Boolean);
+  const first = parts[0]?.[0] ?? "U";
+  const last = parts.length > 1 ? parts[parts.length - 1]?.[0] : "";
+  return (first + last).toUpperCase();
+}
+
+function formatTime(raw: any) {
+  const d = toDate(raw);
+  if (!d) return "";
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
 export default function MatchChatScreen() {
   const router = useRouter();
   const params = useLocalSearchParams();
   const matchIdStr = paramToString(params?.matchId);
-
   const { user } = useAuth();
 
   const [loading, setLoading] = useState(true);
@@ -57,8 +81,8 @@ export default function MatchChatScreen() {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
 
-  // Auto-scroll ref
-  const scrollRef = useRef<ScrollView | null>(null);
+  // FlatList ref (for occasional scroll control)
+  const listRef = useRef<FlatList<ChatMessage> | null>(null);
 
   // Load teamId from match doc (needed for writing + rules)
   useEffect(() => {
@@ -101,12 +125,17 @@ export default function MatchChatScreen() {
     };
   }, [matchIdStr]);
 
-  // Live subscribe to messages
+  // Live subscribe to messages (newest first for FlatList + inverted)
   useEffect(() => {
     if (!matchIdStr) return;
 
     const colRef = collection(db, "matchMessages");
-    const q = query(colRef, where("matchId", "==", matchIdStr), orderBy("createdAt", "asc"));
+    const q = query(
+      colRef,
+      where("matchId", "==", matchIdStr),
+      orderBy("createdAt", "desc"),
+      limit(200)
+    );
 
     const unsub = onSnapshot(
       q,
@@ -120,20 +149,14 @@ export default function MatchChatScreen() {
             userId: String(data.userId ?? ""),
             displayName: String(data.displayName ?? "Someone"),
             text: String(data.text ?? ""),
+            photoURL: (data.photoURL as string) ?? null,
             createdAt: data.createdAt,
           };
         });
 
         setMessages(list);
-
-        // scroll to bottom after messages arrive
-        setTimeout(() => {
-          scrollRef.current?.scrollToEnd({ animated: true });
-        }, 50);
       },
-      (err) => {
-        console.error("Chat listener error:", err);
-      }
+      (err) => console.error("Chat listener error:", err)
     );
 
     return () => unsub();
@@ -151,18 +174,9 @@ export default function MatchChatScreen() {
   }, [user?.uid, matchIdStr, matchTeamId, text, sending]);
 
   const handleSend = async () => {
-    if (!user?.uid) {
-      Alert.alert("Please sign in");
-      return;
-    }
-    if (!matchIdStr) {
-      Alert.alert("Missing match id");
-      return;
-    }
-    if (!matchTeamId) {
-      Alert.alert("Match not found");
-      return;
-    }
+    if (!user?.uid) return Alert.alert("Please sign in");
+    if (!matchIdStr) return Alert.alert("Missing match id");
+    if (!matchTeamId) return Alert.alert("Match not found");
 
     const body = text.trim();
     if (!body) return;
@@ -174,14 +188,17 @@ export default function MatchChatScreen() {
     try {
       setSending(true);
 
-      // best-effort displayName from users/{uid}.displayName
+      // Best-effort pull from users/{uid} (you can read your own doc)
       let displayName = user.email ?? "Player";
+      let photoURL: string | null = null;
+
       try {
         const userRef = doc(db, "users", user.uid);
         const userSnap = await getDoc(userRef);
         if (userSnap.exists()) {
           const ud = userSnap.data() as any;
           if (ud?.displayName) displayName = String(ud.displayName);
+          if (ud?.photoURL) photoURL = String(ud.photoURL);
         }
       } catch {
         // ignore
@@ -192,14 +209,17 @@ export default function MatchChatScreen() {
         teamId: matchTeamId,
         userId: user.uid,
         displayName,
+        photoURL: photoURL ?? null,
         text: body,
         createdAt: serverTimestamp(),
       });
 
       setText("");
-      setTimeout(() => {
-        scrollRef.current?.scrollToEnd({ animated: true });
-      }, 50);
+
+      // optional: nudge list to bottom (inverted list => offset 0 is bottom)
+      requestAnimationFrame(() => {
+        listRef.current?.scrollToOffset({ offset: 0, animated: true });
+      });
     } catch (e) {
       console.error("Send message error:", e);
       Alert.alert("Error", "Could not send message.");
@@ -256,44 +276,74 @@ export default function MatchChatScreen() {
         behavior={Platform.OS === "ios" ? "padding" : undefined}
         keyboardVerticalOffset={Platform.OS === "ios" ? 64 : 0}
       >
-        {/* Header with back */}
+        {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity onPress={handleBack} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+          <TouchableOpacity
+            onPress={handleBack}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
             <Text style={styles.backText}>‹ Back</Text>
           </TouchableOpacity>
 
           <Text style={styles.headerTitle}>Match Chat</Text>
 
-          {/* spacer so title stays centered */}
           <View style={{ width: 60 }} />
         </View>
 
-        <ScrollView
-          ref={scrollRef}
+        <FlatList
+          ref={(r) => {
+            listRef.current = r;
+          }}
           style={{ flex: 1 }}
-          contentInsetAdjustmentBehavior="automatic"
           contentContainerStyle={styles.messagesContainer}
-          onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
-        >
-          {messages.length === 0 ? (
+          data={messages}
+          inverted
+          keyExtractor={(m) => m.id}
+          keyboardShouldPersistTaps="handled"
+          ListEmptyComponent={
             <Text style={styles.emptyText}>No messages yet. Say hi 👋</Text>
-          ) : (
-            messages.map((m) => {
-              const mine = m.userId === user?.uid;
-              return (
-                <View
-                  key={m.id}
-                  style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleOther]}
-                >
-                  {!mine && <Text style={styles.bubbleName}>{m.displayName}</Text>}
-                  <Text style={styles.bubbleText}>{m.text}</Text>
-                </View>
-              );
-            })
-          )}
+          }
+          renderItem={({ item }) => {
+            const mine = item.userId === user?.uid;
+            const initials = initialsFromName(item.displayName);
+            const t = formatTime(item.createdAt);
 
-          <View style={{ height: 12 }} />
-        </ScrollView>
+            return (
+              <View style={[styles.row, mine ? styles.rowMine : styles.rowOther]}>
+                {!mine && (
+                  <View style={styles.avatarWrap}>
+                    {item.photoURL ? (
+                      <Image source={{ uri: item.photoURL }} style={styles.avatarImg} />
+                    ) : (
+                      <View style={styles.avatarFallback}>
+                        <Text style={styles.avatarText}>{initials}</Text>
+                      </View>
+                    )}
+                  </View>
+                )}
+
+                <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleOther]}>
+                  {!mine && <Text style={styles.bubbleName}>{item.displayName}</Text>}
+                  <Text style={styles.bubbleText}>{item.text}</Text>
+                  {!!t && <Text style={styles.timeText}>{t}</Text>}
+                </View>
+
+                {mine && (
+                  <View style={styles.avatarWrap}>
+                    {/* show my avatar too for symmetry (optional) */}
+                    {item.photoURL ? (
+                      <Image source={{ uri: item.photoURL }} style={styles.avatarImg} />
+                    ) : (
+                      <View style={styles.avatarFallback}>
+                        <Text style={styles.avatarText}>{initials}</Text>
+                      </View>
+                    )}
+                  </View>
+                )}
+              </View>
+            );
+          }}
+        />
 
         <View style={styles.composer}>
           <TextInput
@@ -338,23 +388,58 @@ const styles = StyleSheet.create({
   messagesContainer: {
     padding: 16,
     paddingBottom: 8,
+    gap: 10,
   },
 
   emptyText: { color: "#666" },
 
+  row: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    gap: 10,
+  },
+  rowMine: {
+    justifyContent: "flex-end",
+  },
+  rowOther: {
+    justifyContent: "flex-start",
+  },
+
+  avatarWrap: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    overflow: "hidden",
+  },
+  avatarImg: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+  },
+  avatarFallback: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: "#eef3ff",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  avatarText: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#2b4cff",
+  },
+
   bubble: {
-    maxWidth: "85%",
+    maxWidth: "78%",
     paddingVertical: 8,
     paddingHorizontal: 10,
     borderRadius: 12,
-    marginBottom: 10,
   },
   bubbleMine: {
-    alignSelf: "flex-end",
     backgroundColor: "#D7EBFF",
   },
   bubbleOther: {
-    alignSelf: "flex-start",
     backgroundColor: "#F2F2F2",
   },
   bubbleName: {
@@ -364,6 +449,12 @@ const styles = StyleSheet.create({
     color: "#333",
   },
   bubbleText: { color: "#111" },
+  timeText: {
+    marginTop: 6,
+    fontSize: 11,
+    color: "#666",
+    alignSelf: "flex-end",
+  },
 
   composer: {
     flexDirection: "row",
@@ -383,7 +474,5 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 8,
   },
-  sendBtn: {
-    width: 80,
-  },
+  sendBtn: { width: 80 },
 });
