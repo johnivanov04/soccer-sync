@@ -1,5 +1,5 @@
 import * as admin from "firebase-admin";
-import { onDocumentWritten } from "firebase-functions/v2/firestore";
+import { onDocumentCreated, onDocumentWritten } from "firebase-functions/v2/firestore";
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -8,6 +8,11 @@ function uniqStrings(xs: any[]): string[] {
   return Array.from(
     new Set(xs.filter((x) => typeof x === "string" && x.trim()).map((x) => x.trim()))
   );
+}
+
+function truncate(s: string, n: number) {
+  const t = String(s ?? "");
+  return t.length > n ? t.slice(0, n - 1) + "…" : t;
 }
 
 async function sendExpoPushMany(messages: any[]) {
@@ -145,6 +150,111 @@ async function promoteIfNeeded(matchId: string) {
 
   await sendExpoPushMany(messages);
 }
+
+/**
+ * ✅ NEW: Chat notifications
+ * Trigger when a message is CREATED in matchMessages.
+ * Sends a push to:
+ *  - everyone with an RSVP (yes/maybe) for that match
+ *  - plus the match host (createdBy)
+ *  - excluding the sender
+ *
+ * Push "data" includes { matchId, type: "chat" } so your app/_layout.tsx routes to chat.
+ */
+export const onMatchMessageCreate = onDocumentCreated(
+  "matchMessages/{msgId}",
+  async (event) => {
+    const snap = event.data;
+    if (!snap) return;
+
+    const msgId = snap.id;
+    const data = snap.data() as any;
+
+    const matchId = String(data?.matchId ?? "");
+    const senderId = String(data?.userId ?? "");
+    const senderName = String(data?.displayName ?? "Someone");
+    const text = String(data?.text ?? "");
+
+    if (!matchId || !senderId || !text.trim()) return;
+
+    const msgRef = db.collection("matchMessages").doc(msgId);
+
+    // Idempotency: if retried, don't double-send
+    const fresh = await msgRef.get();
+    const freshData = fresh.data() as any;
+    if (freshData?.notifiedAt) return;
+
+    // Load match (for createdBy / host)
+    const matchSnap = await db.collection("matches").doc(matchId).get();
+    const match = (matchSnap.exists ? (matchSnap.data() as any) : null) ?? null;
+    const hostId = match?.createdBy ? String(match.createdBy) : null;
+
+    // Collect recipients from RSVPs (yes/maybe)
+    const rsvpSnap = await db.collection("rsvps").where("matchId", "==", matchId).get();
+
+    const recipientIds: string[] = [];
+
+    for (const d of rsvpSnap.docs) {
+      const r = d.data() as any;
+      const uid = r?.userId ? String(r.userId) : "";
+      const st = String(r?.status ?? "").toLowerCase();
+      if (!uid) continue;
+
+      // Only notify people who actually care about the match
+      if (st === "yes" || st === "maybe") recipientIds.push(uid);
+    }
+
+    if (hostId) recipientIds.push(hostId);
+
+    // remove sender + uniq
+    const finalRecipientIds = uniqStrings(recipientIds).filter((uid) => uid !== senderId);
+    if (finalRecipientIds.length === 0) {
+      // still mark as handled
+      await msgRef.set(
+        { notifiedAt: admin.firestore.FieldValue.serverTimestamp() },
+        { merge: true }
+      );
+      return;
+    }
+
+    // Build Expo pushes
+    const pushes: any[] = [];
+    const body = truncate(text.trim(), 180);
+    const title = "Match Chat";
+
+    for (const uid of finalRecipientIds) {
+      const userSnap = await db.collection("users").doc(uid).get();
+      if (!userSnap.exists) continue;
+
+      const u = userSnap.data() as any;
+      const tokens = uniqStrings([
+        ...(Array.isArray(u?.expoPushTokens) ? u.expoPushTokens : []),
+        ...(u?.expoPushToken ? [u.expoPushToken] : []),
+      ]);
+
+      for (const t of tokens) {
+        pushes.push({
+          to: t,
+          title,
+          body: `${senderName}: ${body}`,
+          sound: "default",
+          data: {
+            matchId,
+            type: "chat", // ✅ your app/_layout.tsx will route to chat
+          },
+        });
+      }
+    }
+
+    await sendExpoPushMany(pushes);
+
+    // mark handled (won't retrigger because this is onCreate)
+    await msgRef.set(
+      { notifiedAt: admin.firestore.FieldValue.serverTimestamp() },
+      { merge: true }
+    );
+  }
+);
 
 /**
  * Trigger on ANY RSVP create/update/delete:

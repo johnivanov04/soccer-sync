@@ -7,6 +7,7 @@ import { initNotifications } from "../src/utils/notificationsSetup";
 
 type PendingRoute =
   | { pathname: "/(app)/match/[matchId]"; params: { matchId: string } }
+  | { pathname: "/(app)/match/chat/[matchId]"; params: { matchId: string } }
   | null;
 
 function RootNavigation() {
@@ -20,20 +21,52 @@ function RootNavigation() {
   // if user taps a notification while logged out, remember where to go after login
   const pendingRouteRef = useRef<PendingRoute>(null);
 
-  const handleNotificationResponse = (response: Notifications.NotificationResponse) => {
+  function buildTargetFromData(data: any): PendingRoute {
+    if (!data) return null;
+
+    const matchIdRaw = data?.matchId ?? data?.matchID ?? data?.match_id;
+    if (!matchIdRaw) return null;
+
+    const matchId = String(matchIdRaw);
+
+    // You can send any of these in notification "data"
+    //   type: "match" | "chat"
+    //   screen: "match" | "chat"
+    //   route: "match" | "chat"
+    const kind = String(data?.type ?? data?.screen ?? data?.route ?? "")
+      .toLowerCase()
+      .trim();
+
+    const goChat =
+      kind === "chat" ||
+      kind === "matchchat" ||
+      kind === "match_chat" ||
+      data?.openChat === true;
+
+    if (goChat) {
+      return {
+        pathname: "/(app)/match/chat/[matchId]",
+        params: { matchId },
+      };
+    }
+
+    // default: match detail screen
+    return {
+      pathname: "/(app)/match/[matchId]",
+      params: { matchId },
+    };
+  }
+
+  const handleNotificationResponse = (
+    response: Notifications.NotificationResponse
+  ) => {
     const notifId = response?.notification?.request?.identifier ?? null;
     if (notifId && lastHandledNotificationIdRef.current === notifId) return;
     if (notifId) lastHandledNotificationIdRef.current = notifId;
 
     const data = (response?.notification?.request?.content?.data ?? {}) as any;
-    const matchId = data?.matchId ?? data?.matchID ?? data?.match_id;
-
-    if (!matchId) return;
-
-    const target: PendingRoute = {
-      pathname: "/(app)/match/[matchId]",
-      params: { matchId: String(matchId) },
-    };
+    const target = buildTargetFromData(data);
+    if (!target) return;
 
     // If not ready / not logged in yet, store it and let auth routing handle later
     if (initializing || !user) {
@@ -47,7 +80,9 @@ function RootNavigation() {
   // Listen for notification taps + app opened from a notification
   useEffect(() => {
     const responseSub =
-      Notifications.addNotificationResponseReceivedListener(handleNotificationResponse);
+      Notifications.addNotificationResponseReceivedListener(
+        handleNotificationResponse
+      );
 
     (async () => {
       try {
@@ -90,7 +125,6 @@ function RootNavigation() {
 }
 
 export default function RootLayout() {
-  // ✅ initialize notification handler + debug listeners exactly once
   useEffect(() => {
     initNotifications();
   }, []);
