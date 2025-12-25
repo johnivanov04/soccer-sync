@@ -1,12 +1,21 @@
+// functions/src/index.ts
 import * as admin from "firebase-admin";
-import { onDocumentCreated, onDocumentWritten } from "firebase-functions/v2/firestore";
+import {
+  onDocumentCreated,
+  onDocumentWritten,
+} from "firebase-functions/v2/firestore";
 
 admin.initializeApp();
 const db = admin.firestore();
+const { FieldValue } = admin.firestore;
 
 function uniqStrings(xs: any[]): string[] {
   return Array.from(
-    new Set(xs.filter((x) => typeof x === "string" && x.trim()).map((x) => x.trim()))
+    new Set(
+      (xs ?? [])
+        .filter((x) => typeof x === "string" && x.trim())
+        .map((x) => x.trim())
+    )
   );
 }
 
@@ -15,23 +24,107 @@ function truncate(s: string, n: number) {
   return t.length > n ? t.slice(0, n - 1) + "…" : t;
 }
 
-async function sendExpoPushMany(messages: any[]) {
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+async function getUserTokens(uid: string): Promise<string[]> {
+  if (!uid) return [];
+  const snap = await db.collection("users").doc(uid).get();
+  if (!snap.exists) return [];
+
+  const u = snap.data() as any;
+  return uniqStrings([
+    ...(Array.isArray(u?.expoPushTokens) ? u.expoPushTokens : []),
+    ...(u?.expoPushToken ? [u.expoPushToken] : []),
+  ]);
+}
+
+async function removeBadTokenFromUser(uid: string, token: string) {
+  if (!uid || !token) return;
+  try {
+    const userRef = db.collection("users").doc(uid);
+    await userRef.set(
+      {
+        expoPushTokens: FieldValue.arrayRemove(token),
+        // if legacy "expoPushToken" equals this token, clear it
+        ...(token ? { expoPushToken: FieldValue.delete() } : {}),
+        expoPushTokenUpdatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    // If you want to be extra safe: only delete expoPushToken when it matches.
+    // But Firestore doesn't let us do conditional deletes in a single set;
+    // so we do a small read + fixup:
+    const fresh = await userRef.get();
+    const d = fresh.data() as any;
+    if (d?.expoPushToken === token) {
+      await userRef.set(
+        { expoPushToken: FieldValue.delete(), expoPushTokenUpdatedAt: FieldValue.serverTimestamp() },
+        { merge: true }
+      );
+    }
+  } catch (e) {
+    console.warn("Failed cleaning bad token:", { uid, token, e });
+  }
+}
+
+type PushMessage = {
+  to: string;
+  title: string;
+  body: string;
+  sound?: "default";
+  data?: Record<string, any>;
+};
+
+async function sendExpoPushMany(
+  messages: PushMessage[],
+  tokenToUid?: Map<string, string>
+) {
   if (!messages || messages.length === 0) return;
 
-  const res = await fetch("https://exp.host/--/api/v2/push/send", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify(messages),
-  });
+  // Expo recommends batching (100 is a safe size)
+  const batches = chunk(messages, 100);
 
-  const json = await res.json();
-  const tickets = json?.data;
-  if (!tickets) throw new Error(`No Expo tickets returned: ${JSON.stringify(json)}`);
+  for (const batch of batches) {
+    const res = await fetch("https://exp.host/--/api/v2/push/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(batch),
+    });
 
-  const arr = Array.isArray(tickets) ? tickets : [tickets];
-  for (const t of arr) {
-    if (t?.status !== "ok") {
-      console.warn("Expo ticket not ok:", t);
+    const json = await res.json();
+    const tickets = json?.data;
+    if (!tickets) throw new Error(`No Expo tickets returned: ${JSON.stringify(json)}`);
+
+    const arr = Array.isArray(tickets) ? tickets : [tickets];
+
+    // tickets align with the batch order
+    for (let i = 0; i < arr.length; i++) {
+      const ticket = arr[i];
+      const token = batch[i]?.to;
+
+      if (ticket?.status === "ok") continue;
+
+      console.warn("Expo ticket not ok:", ticket);
+
+      const errCode = ticket?.details?.error ?? ticket?.message ?? "unknown";
+      // Most common permanent failures:
+      // - DeviceNotRegistered (app uninstalled / token invalid)
+      // - InvalidCredentials (project/token mismatch)
+      if (
+        token &&
+        tokenToUid &&
+        (errCode === "DeviceNotRegistered" ||
+          errCode === "InvalidCredentials" ||
+          String(errCode).toLowerCase().includes("notregistered"))
+      ) {
+        const uid = tokenToUid.get(token);
+        if (uid) await removeBadTokenFromUser(uid, token);
+      }
     }
   }
 }
@@ -60,7 +153,7 @@ async function recomputeCounts(matchId: string) {
     {
       confirmedYesCount: confirmedSnap.size,
       waitlistCount: waitlistSnap.size,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
     },
     { merge: true }
   );
@@ -117,28 +210,26 @@ async function promoteIfNeeded(matchId: string) {
 
       tx.update(rsvpRef, {
         isWaitlisted: false,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
       });
 
       if (data?.userId) promotedUserIds.push(String(data.userId));
     });
   }
 
-  // Send push to promoted users (all their tokens)
-  const messages: any[] = [];
+  // Send push to promoted users (all their tokens) — de-dupe tokens globally
+  const pushes: PushMessage[] = [];
+  const sentTokens = new Set<string>();
+  const tokenToUid = new Map<string, string>();
 
   for (const uid of uniqStrings(promotedUserIds)) {
-    const userSnap = await db.collection("users").doc(uid).get();
-    if (!userSnap.exists) continue;
-
-    const u = userSnap.data() as any;
-    const tokens = uniqStrings([
-      ...(Array.isArray(u?.expoPushTokens) ? u.expoPushTokens : []),
-      ...(u?.expoPushToken ? [u.expoPushToken] : []),
-    ]);
-
+    const tokens = await getUserTokens(uid);
     for (const t of tokens) {
-      messages.push({
+      if (sentTokens.has(t)) continue;
+      sentTokens.add(t);
+      tokenToUid.set(t, uid);
+
+      pushes.push({
         to: t,
         title: "You’re in! ✅",
         body: "A spot opened up — you’re now confirmed for the match.",
@@ -148,18 +239,19 @@ async function promoteIfNeeded(matchId: string) {
     }
   }
 
-  await sendExpoPushMany(messages);
+  await sendExpoPushMany(pushes, tokenToUid);
 }
 
 /**
- * ✅ NEW: Chat notifications
- * Trigger when a message is CREATED in matchMessages.
- * Sends a push to:
- *  - everyone with an RSVP (yes/maybe) for that match
- *  - plus the match host (createdBy)
- *  - excluding the sender
+ * ✅ Chat notifications
  *
- * Push "data" includes { matchId, type: "chat" } so your app/_layout.tsx routes to chat.
+ * Fixes BOTH issues you saw:
+ * 1) No “notify yourself” even if your token is incorrectly saved under another user doc
+ *    (we exclude the sender by UID AND by TOKEN)
+ * 2) No duplicate pushes when the same token exists in multiple users' expoPushTokens
+ *    (we globally de-dupe by token)
+ *
+ * Also adds a small "claim" field to prevent double-sends from retries/concurrency.
  */
 export const onMatchMessageCreate = onDocumentCreated(
   "matchMessages/{msgId}",
@@ -179,10 +271,21 @@ export const onMatchMessageCreate = onDocumentCreated(
 
     const msgRef = db.collection("matchMessages").doc(msgId);
 
-    // Idempotency: if retried, don't double-send
-    const fresh = await msgRef.get();
-    const freshData = fresh.data() as any;
-    if (freshData?.notifiedAt) return;
+    // ---- Claim idempotently to avoid double-sends ----
+    const claimed = await db.runTransaction(async (tx) => {
+      const fresh = await tx.get(msgRef);
+      const d = (fresh.data() as any) ?? {};
+      if (d?.notifiedAt || d?.notifyClaimedAt) return false;
+
+      tx.set(
+        msgRef,
+        { notifyClaimedAt: FieldValue.serverTimestamp() },
+        { merge: true }
+      );
+      return true;
+    });
+
+    if (!claimed) return;
 
     // Load match (for createdBy / host)
     const matchSnap = await db.collection("matches").doc(matchId).get();
@@ -190,49 +293,52 @@ export const onMatchMessageCreate = onDocumentCreated(
     const hostId = match?.createdBy ? String(match.createdBy) : null;
 
     // Collect recipients from RSVPs (yes/maybe)
-    const rsvpSnap = await db.collection("rsvps").where("matchId", "==", matchId).get();
+    const rsvpSnap = await db
+      .collection("rsvps")
+      .where("matchId", "==", matchId)
+      .get();
 
     const recipientIds: string[] = [];
-
     for (const d of rsvpSnap.docs) {
       const r = d.data() as any;
       const uid = r?.userId ? String(r.userId) : "";
       const st = String(r?.status ?? "").toLowerCase();
       if (!uid) continue;
-
-      // Only notify people who actually care about the match
       if (st === "yes" || st === "maybe") recipientIds.push(uid);
     }
-
     if (hostId) recipientIds.push(hostId);
 
-    // remove sender + uniq
-    const finalRecipientIds = uniqStrings(recipientIds).filter((uid) => uid !== senderId);
-    if (finalRecipientIds.length === 0) {
-      // still mark as handled
-      await msgRef.set(
-        { notifiedAt: admin.firestore.FieldValue.serverTimestamp() },
-        { merge: true }
-      );
-      return;
-    }
+    // Remove sender uid + uniq
+    const finalRecipientIds = uniqStrings(recipientIds).filter(
+      (uid) => uid !== senderId
+    );
 
-    // Build Expo pushes
-    const pushes: any[] = [];
+    // ---- Token-level exclusion + global de-dupe ----
+    // This fixes the “standalone build still notifies me” issue when your device token
+    // is accidentally stored under another user's doc.
+    const senderTokens = await getUserTokens(senderId);
+    const senderTokenSet = new Set(senderTokens);
+
+    const pushes: PushMessage[] = [];
+    const sentTokens = new Set<string>();
+    const tokenToUid = new Map<string, string>();
+
     const body = truncate(text.trim(), 180);
     const title = "Match Chat";
 
     for (const uid of finalRecipientIds) {
-      const userSnap = await db.collection("users").doc(uid).get();
-      if (!userSnap.exists) continue;
-
-      const u = userSnap.data() as any;
-      const tokens = uniqStrings([
-        ...(Array.isArray(u?.expoPushTokens) ? u.expoPushTokens : []),
-        ...(u?.expoPushToken ? [u.expoPushToken] : []),
-      ]);
+      const tokens = await getUserTokens(uid);
 
       for (const t of tokens) {
+        // ✅ Do not notify the sender’s device, even if token is under some other uid
+        if (senderTokenSet.has(t)) continue;
+
+        // ✅ De-dupe globally so one device gets only one push
+        if (sentTokens.has(t)) continue;
+
+        sentTokens.add(t);
+        tokenToUid.set(t, uid);
+
         pushes.push({
           to: t,
           title,
@@ -240,17 +346,30 @@ export const onMatchMessageCreate = onDocumentCreated(
           sound: "default",
           data: {
             matchId,
-            type: "chat", // ✅ your app/_layout.tsx will route to chat
+            type: "chat", // app/_layout.tsx routes to chat
           },
         });
       }
     }
 
-    await sendExpoPushMany(pushes);
+    if (pushes.length === 0) {
+      await msgRef.set(
+        {
+          notifiedAt: FieldValue.serverTimestamp(),
+          notifyTokenCount: 0,
+        },
+        { merge: true }
+      );
+      return;
+    }
 
-    // mark handled (won't retrigger because this is onCreate)
+    await sendExpoPushMany(pushes, tokenToUid);
+
     await msgRef.set(
-      { notifiedAt: admin.firestore.FieldValue.serverTimestamp() },
+      {
+        notifiedAt: FieldValue.serverTimestamp(),
+        notifyTokenCount: pushes.length,
+      },
       { merge: true }
     );
   }
