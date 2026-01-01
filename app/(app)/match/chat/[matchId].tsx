@@ -16,7 +16,6 @@ import {
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
-  Button,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -54,6 +53,18 @@ function toDate(raw: any): Date | null {
   return Number.isFinite(d.getTime()) ? d : null;
 }
 
+function isSameDay(a: Date, b: Date) {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
+}
+
+function minutesDiff(a: Date, b: Date) {
+  return Math.abs(a.getTime() - b.getTime()) / 60000;
+}
+
 function initialsFromName(name: string) {
   const base = (name || "").trim();
   if (!base) return "U";
@@ -69,6 +80,23 @@ function formatTime(raw: any) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function formatDayLabel(d: Date) {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const that = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+
+  const diffDays = Math.round((today.getTime() - that.getTime()) / 86400000);
+
+  if (diffDays === 0) return "Today";
+  if (diffDays === 1) return "Yesterday";
+
+  return d.toLocaleDateString([], {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  });
+}
+
 export default function MatchChatScreen() {
   const router = useRouter();
   const params = useLocalSearchParams();
@@ -81,8 +109,8 @@ export default function MatchChatScreen() {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
 
-  // FlatList ref (for occasional scroll control)
-  const listRef = useRef<FlatList<ChatMessage> | null>(null);
+  // ✅ Correctly typed FlatList ref
+  const listRef = useRef<FlatList<ChatMessage>>(null);
 
   // Load teamId from match doc (needed for writing + rules)
   useEffect(() => {
@@ -188,7 +216,7 @@ export default function MatchChatScreen() {
     try {
       setSending(true);
 
-      // Best-effort pull from users/{uid} (you can read your own doc)
+      // Best-effort pull from users/{uid}
       let displayName = user.email ?? "Player";
       let photoURL: string | null = null;
 
@@ -216,7 +244,7 @@ export default function MatchChatScreen() {
 
       setText("");
 
-      // optional: nudge list to bottom (inverted list => offset 0 is bottom)
+      // inverted list => offset 0 is "bottom"
       requestAnimationFrame(() => {
         listRef.current?.scrollToOffset({ offset: 0, animated: true });
       });
@@ -236,7 +264,9 @@ export default function MatchChatScreen() {
         <View style={styles.container}>
           <Text>Missing match id.</Text>
           <View style={{ marginTop: 12 }}>
-            <Button title="Back" onPress={handleBack} />
+            <TouchableOpacity style={styles.backBtn} onPress={handleBack}>
+              <Text style={styles.backBtnText}>Back</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </SafeAreaView>
@@ -249,7 +279,9 @@ export default function MatchChatScreen() {
         <View style={styles.container}>
           <Text>Loading chat...</Text>
           <View style={{ marginTop: 12 }}>
-            <Button title="Back" onPress={handleBack} />
+            <TouchableOpacity style={styles.backBtn} onPress={handleBack}>
+              <Text style={styles.backBtnText}>Back</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </SafeAreaView>
@@ -262,12 +294,16 @@ export default function MatchChatScreen() {
         <View style={styles.container}>
           <Text>Match not found.</Text>
           <View style={{ marginTop: 12 }}>
-            <Button title="Back" onPress={handleBack} />
+            <TouchableOpacity style={styles.backBtn} onPress={handleBack}>
+              <Text style={styles.backBtnText}>Back</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </SafeAreaView>
     );
   }
+
+  const CLUSTER_MINUTES = 5;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -286,60 +322,126 @@ export default function MatchChatScreen() {
           </TouchableOpacity>
 
           <Text style={styles.headerTitle}>Match Chat</Text>
-
           <View style={{ width: 60 }} />
         </View>
 
         <FlatList
-          ref={(r) => {
-            listRef.current = r;
-          }}
+          ref={listRef}
           style={{ flex: 1 }}
           contentContainerStyle={styles.messagesContainer}
           data={messages}
           inverted
           keyExtractor={(m) => m.id}
           keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+          removeClippedSubviews={Platform.OS === "android"}
+          initialNumToRender={24}
+          maxToRenderPerBatch={24}
+          windowSize={9}
           ListEmptyComponent={
             <Text style={styles.emptyText}>No messages yet. Say hi 👋</Text>
           }
-          renderItem={({ item }) => {
+          ListFooterComponent={<View style={{ height: 8 }} />}
+          renderItem={({ item, index }) => {
             const mine = item.userId === user?.uid;
             const initials = initialsFromName(item.displayName);
-            const t = formatTime(item.createdAt);
+
+            // Because query is createdAt DESC:
+            // - messages[index - 1] is NEWER
+            // - messages[index + 1] is OLDER
+            const prev = messages[index - 1]; // newer message
+            const next = messages[index + 1]; // older message (used for date separators)
+
+            const tCur = toDate(item.createdAt);
+            const tPrev = toDate(prev?.createdAt);
+            const tNext = toDate(next?.createdAt);
+
+            // ✅ Cluster with the previous (newer) message
+            const sameSenderAsPrev = !!prev?.userId && prev.userId === item.userId;
+            const withinClusterWithPrev =
+              tCur && tPrev ? minutesDiff(tCur, tPrev) <= CLUSTER_MINUTES : false;
+
+            // ✅ Show avatar/name/time on the NEWEST bubble in a cluster (bottom bubble)
+            // That means: show meta when this message does NOT belong to the same cluster as prev.
+            const showMeta = !prev || !sameSenderAsPrev || !withinClusterWithPrev;
+
+            // Date separator when we cross into a different day (boundary between current and older)
+            const showDateSeparator = !!tCur && (!tNext || !isSameDay(tCur, tNext));
+
+            const timeLabel = tCur ? formatTime(item.createdAt) : "";
 
             return (
-              <View style={[styles.row, mine ? styles.rowMine : styles.rowOther]}>
-                {!mine && (
-                  <View style={styles.avatarWrap}>
-                    {item.photoURL ? (
-                      <Image source={{ uri: item.photoURL }} style={styles.avatarImg} />
-                    ) : (
-                      <View style={styles.avatarFallback}>
-                        <Text style={styles.avatarText}>{initials}</Text>
-                      </View>
-                    )}
+              <View>
+                {showDateSeparator && (
+                  <View style={styles.dateSepWrap}>
+                    <View style={styles.dateSepPill}>
+                      <Text style={styles.dateSepText}>{formatDayLabel(tCur!)}</Text>
+                    </View>
                   </View>
                 )}
 
-                <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleOther]}>
-                  {!mine && <Text style={styles.bubbleName}>{item.displayName}</Text>}
-                  <Text style={styles.bubbleText}>{item.text}</Text>
-                  {!!t && <Text style={styles.timeText}>{t}</Text>}
+                <View style={[styles.row, mine ? styles.rowMine : styles.rowOther]}>
+                  {/* Left avatar (others) */}
+                  {!mine ? (
+                    showMeta ? (
+                      <View style={styles.avatarWrap}>
+                        {item.photoURL ? (
+                          <Image
+                            source={{ uri: item.photoURL }}
+                            style={styles.avatarImg}
+                          />
+                        ) : (
+                          <View style={styles.avatarFallback}>
+                            <Text style={styles.avatarText}>{initials}</Text>
+                          </View>
+                        )}
+                      </View>
+                    ) : (
+                      <View style={styles.avatarSpacer} />
+                    )
+                  ) : (
+                    <View style={styles.avatarSpacer} />
+                  )}
+
+                  <View
+                    style={[
+                      styles.bubble,
+                      mine ? styles.bubbleMine : styles.bubbleOther,
+                      !showMeta && !mine ? { marginLeft: 0 } : null,
+                    ]}
+                  >
+                    {!mine && showMeta && (
+                      <Text style={styles.bubbleName}>{item.displayName}</Text>
+                    )}
+                    <Text style={styles.bubbleText}>{item.text}</Text>
+
+                    {showMeta && !!timeLabel && (
+                      <Text style={styles.timeText}>{timeLabel}</Text>
+                    )}
+                  </View>
+
+                  {/* Right avatar (mine) */}
+                  {mine ? (
+                    showMeta ? (
+                      <View style={styles.avatarWrap}>
+                        {item.photoURL ? (
+                          <Image
+                            source={{ uri: item.photoURL }}
+                            style={styles.avatarImg}
+                          />
+                        ) : (
+                          <View style={styles.avatarFallback}>
+                            <Text style={styles.avatarText}>{initials}</Text>
+                          </View>
+                        )}
+                      </View>
+                    ) : (
+                      <View style={styles.avatarSpacer} />
+                    )
+                  ) : (
+                    <View style={styles.avatarSpacer} />
+                  )}
                 </View>
-
-                {mine && (
-                  <View style={styles.avatarWrap}>
-                    {/* show my avatar too for symmetry (optional) */}
-                    {item.photoURL ? (
-                      <Image source={{ uri: item.photoURL }} style={styles.avatarImg} />
-                    ) : (
-                      <View style={styles.avatarFallback}>
-                        <Text style={styles.avatarText}>{initials}</Text>
-                      </View>
-                    )}
-                  </View>
-                )}
               </View>
             );
           }}
@@ -354,14 +456,22 @@ export default function MatchChatScreen() {
             maxLength={500}
             multiline
           />
-          <View style={styles.sendBtn}>
-            <Button title={sending ? "…" : "Send"} onPress={handleSend} disabled={!canSend} />
-          </View>
+
+          <TouchableOpacity
+            style={[styles.sendButton, !canSend && styles.sendButtonDisabled]}
+            onPress={handleSend}
+            disabled={!canSend}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.sendButtonText}>{sending ? "…" : "Send"}</Text>
+          </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
+
+const AVATAR = 32;
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
@@ -396,30 +506,26 @@ const styles = StyleSheet.create({
   row: {
     flexDirection: "row",
     alignItems: "flex-end",
-    gap: 10,
   },
-  rowMine: {
-    justifyContent: "flex-end",
-  },
-  rowOther: {
-    justifyContent: "flex-start",
-  },
+  rowMine: { justifyContent: "flex-end" },
+  rowOther: { justifyContent: "flex-start" },
 
   avatarWrap: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: AVATAR,
+    height: AVATAR,
+    borderRadius: AVATAR / 2,
     overflow: "hidden",
+    marginHorizontal: 8,
   },
   avatarImg: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: AVATAR,
+    height: AVATAR,
+    borderRadius: AVATAR / 2,
   },
   avatarFallback: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: AVATAR,
+    height: AVATAR,
+    borderRadius: AVATAR / 2,
     backgroundColor: "#eef3ff",
     alignItems: "center",
     justifyContent: "center",
@@ -429,9 +535,15 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     color: "#2b4cff",
   },
+  avatarSpacer: {
+    width: AVATAR,
+    height: AVATAR,
+    marginHorizontal: 8,
+    opacity: 0,
+  },
 
   bubble: {
-    maxWidth: "78%",
+    maxWidth: "70%",
     paddingVertical: 8,
     paddingHorizontal: 10,
     borderRadius: 12,
@@ -456,6 +568,23 @@ const styles = StyleSheet.create({
     alignSelf: "flex-end",
   },
 
+  dateSepWrap: {
+    alignItems: "center",
+    marginBottom: 6,
+    marginTop: 2,
+  },
+  dateSepPill: {
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    backgroundColor: "#eee",
+  },
+  dateSepText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#666",
+  },
+
   composer: {
     flexDirection: "row",
     gap: 10,
@@ -474,5 +603,28 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 8,
   },
-  sendBtn: { width: 80 },
+  sendButton: {
+    width: 80,
+    height: 40,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#007AFF",
+  },
+  sendButtonDisabled: {
+    backgroundColor: "#9cc7ff",
+  },
+  sendButtonText: {
+    color: "#fff",
+    fontWeight: "800",
+  },
+
+  backBtn: {
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    backgroundColor: "#eee",
+    alignSelf: "flex-start",
+  },
+  backBtnText: { fontWeight: "700" },
 });
