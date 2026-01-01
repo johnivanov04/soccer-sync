@@ -49,21 +49,20 @@ async function removeBadTokenFromUser(uid: string, token: string) {
     await userRef.set(
       {
         expoPushTokens: FieldValue.arrayRemove(token),
-        // if legacy "expoPushToken" equals this token, clear it
         ...(token ? { expoPushToken: FieldValue.delete() } : {}),
         expoPushTokenUpdatedAt: FieldValue.serverTimestamp(),
       },
       { merge: true }
     );
 
-    // If you want to be extra safe: only delete expoPushToken when it matches.
-    // But Firestore doesn't let us do conditional deletes in a single set;
-    // so we do a small read + fixup:
     const fresh = await userRef.get();
     const d = fresh.data() as any;
     if (d?.expoPushToken === token) {
       await userRef.set(
-        { expoPushToken: FieldValue.delete(), expoPushTokenUpdatedAt: FieldValue.serverTimestamp() },
+        {
+          expoPushToken: FieldValue.delete(),
+          expoPushTokenUpdatedAt: FieldValue.serverTimestamp(),
+        },
         { merge: true }
       );
     }
@@ -86,7 +85,6 @@ async function sendExpoPushMany(
 ) {
   if (!messages || messages.length === 0) return;
 
-  // Expo recommends batching (100 is a safe size)
   const batches = chunk(messages, 100);
 
   for (const batch of batches) {
@@ -102,7 +100,6 @@ async function sendExpoPushMany(
 
     const arr = Array.isArray(tickets) ? tickets : [tickets];
 
-    // tickets align with the batch order
     for (let i = 0; i < arr.length; i++) {
       const ticket = arr[i];
       const token = batch[i]?.to;
@@ -112,9 +109,6 @@ async function sendExpoPushMany(
       console.warn("Expo ticket not ok:", ticket);
 
       const errCode = ticket?.details?.error ?? ticket?.message ?? "unknown";
-      // Most common permanent failures:
-      // - DeviceNotRegistered (app uninstalled / token invalid)
-      // - InvalidCredentials (project/token mismatch)
       if (
         token &&
         tokenToUid &&
@@ -184,7 +178,6 @@ async function promoteIfNeeded(matchId: string) {
   const openSlots = maxPlayers - confirmedSnap.size;
   if (openSlots <= 0) return;
 
-  // Earliest waitlisted YES first (requires composite index because of orderBy)
   const waitlistedSnap = await rsvpsCol
     .where("matchId", "==", matchId)
     .where("status", "==", "yes")
@@ -197,7 +190,6 @@ async function promoteIfNeeded(matchId: string) {
 
   const promotedUserIds: string[] = [];
 
-  // Transaction per RSVP prevents double-promote under concurrency
   for (const docSnap of waitlistedSnap.docs) {
     const rsvpRef = docSnap.ref;
 
@@ -217,7 +209,6 @@ async function promoteIfNeeded(matchId: string) {
     });
   }
 
-  // Send push to promoted users (all their tokens) — de-dupe tokens globally
   const pushes: PushMessage[] = [];
   const sentTokens = new Set<string>();
   const tokenToUid = new Map<string, string>();
@@ -243,15 +234,15 @@ async function promoteIfNeeded(matchId: string) {
 }
 
 /**
- * ✅ Chat notifications
+ * ✅ Chat notifications + ✅ Match preview fields (lastMessage*)
  *
- * Fixes BOTH issues you saw:
- * 1) No “notify yourself” even if your token is incorrectly saved under another user doc
- *    (we exclude the sender by UID AND by TOKEN)
- * 2) No duplicate pushes when the same token exists in multiple users' expoPushTokens
- *    (we globally de-dupe by token)
+ * Adds:
+ * - matches/{matchId}.lastMessageAt
+ * - matches/{matchId}.lastMessageText
+ * - matches/{matchId}.lastMessageSenderId
+ * - matches/{matchId}.lastMessageSenderName
  *
- * Also adds a small "claim" field to prevent double-sends from retries/concurrency.
+ * Keeps your push fixes (exclude sender by UID + TOKEN, global token de-dupe).
  */
 export const onMatchMessageCreate = onDocumentCreated(
   "matchMessages/{msgId}",
@@ -270,6 +261,24 @@ export const onMatchMessageCreate = onDocumentCreated(
     if (!matchId || !senderId || !text.trim()) return;
 
     const msgRef = db.collection("matchMessages").doc(msgId);
+    const matchRef = db.collection("matches").doc(matchId);
+
+    // Ensure match exists (avoid creating accidental match doc via merge)
+    const matchSnap = await matchRef.get();
+    if (!matchSnap.exists) return;
+
+    // ✅ Always update match preview fields (even if push is skipped later)
+    const createdAt = data?.createdAt ?? FieldValue.serverTimestamp();
+    await matchRef.set(
+      {
+        lastMessageAt: createdAt,
+        lastMessageText: truncate(text.trim(), 220),
+        lastMessageSenderId: senderId,
+        lastMessageSenderName: senderName,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
 
     // ---- Claim idempotently to avoid double-sends ----
     const claimed = await db.runTransaction(async (tx) => {
@@ -287,12 +296,9 @@ export const onMatchMessageCreate = onDocumentCreated(
 
     if (!claimed) return;
 
-    // Load match (for createdBy / host)
-    const matchSnap = await db.collection("matches").doc(matchId).get();
-    const match = (matchSnap.exists ? (matchSnap.data() as any) : null) ?? null;
+    const match = matchSnap.data() as any;
     const hostId = match?.createdBy ? String(match.createdBy) : null;
 
-    // Collect recipients from RSVPs (yes/maybe)
     const rsvpSnap = await db
       .collection("rsvps")
       .where("matchId", "==", matchId)
@@ -308,14 +314,11 @@ export const onMatchMessageCreate = onDocumentCreated(
     }
     if (hostId) recipientIds.push(hostId);
 
-    // Remove sender uid + uniq
     const finalRecipientIds = uniqStrings(recipientIds).filter(
       (uid) => uid !== senderId
     );
 
     // ---- Token-level exclusion + global de-dupe ----
-    // This fixes the “standalone build still notifies me” issue when your device token
-    // is accidentally stored under another user's doc.
     const senderTokens = await getUserTokens(senderId);
     const senderTokenSet = new Set(senderTokens);
 
@@ -330,10 +333,7 @@ export const onMatchMessageCreate = onDocumentCreated(
       const tokens = await getUserTokens(uid);
 
       for (const t of tokens) {
-        // ✅ Do not notify the sender’s device, even if token is under some other uid
         if (senderTokenSet.has(t)) continue;
-
-        // ✅ De-dupe globally so one device gets only one push
         if (sentTokens.has(t)) continue;
 
         sentTokens.add(t);
@@ -344,10 +344,7 @@ export const onMatchMessageCreate = onDocumentCreated(
           title,
           body: `${senderName}: ${body}`,
           sound: "default",
-          data: {
-            matchId,
-            type: "chat", // app/_layout.tsx routes to chat
-          },
+          data: { matchId, type: "chat" },
         });
       }
     }

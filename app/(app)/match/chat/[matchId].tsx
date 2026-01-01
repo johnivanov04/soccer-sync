@@ -38,6 +38,9 @@ type ChatMessage = {
   text: string;
   photoURL?: string | null;
   createdAt?: any;
+
+  // ✅ frozen per message id so clustering never “switches back”
+  stableMs: number;
 };
 
 function paramToString(v: any): string | null {
@@ -46,23 +49,28 @@ function paramToString(v: any): string | null {
   return String(v);
 }
 
-function toDate(raw: any): Date | null {
-  if (!raw) return null;
-  if (typeof raw?.toDate === "function") return raw.toDate();
+function tsToMs(raw: any): number {
+  if (!raw) return 0;
+  if (typeof raw?.toMillis === "function") return raw.toMillis();
+  if (typeof raw?.toDate === "function") return raw.toDate().getTime();
+  if (raw instanceof Date) return raw.getTime();
+  if (typeof raw === "number") return raw;
   const d = new Date(raw);
-  return Number.isFinite(d.getTime()) ? d : null;
+  return Number.isFinite(d.getTime()) ? d.getTime() : 0;
 }
 
-function isSameDay(a: Date, b: Date) {
+function minutesDiffMs(a: number, b: number) {
+  return Math.abs(a - b) / 60000;
+}
+
+function isSameDayMs(a: number, b: number) {
+  const da = new Date(a);
+  const dbb = new Date(b);
   return (
-    a.getFullYear() === b.getFullYear() &&
-    a.getMonth() === b.getMonth() &&
-    a.getDate() === b.getDate()
+    da.getFullYear() === dbb.getFullYear() &&
+    da.getMonth() === dbb.getMonth() &&
+    da.getDate() === dbb.getDate()
   );
-}
-
-function minutesDiff(a: Date, b: Date) {
-  return Math.abs(a.getTime() - b.getTime()) / 60000;
 }
 
 function initialsFromName(name: string) {
@@ -74,27 +82,22 @@ function initialsFromName(name: string) {
   return (first + last).toUpperCase();
 }
 
-function formatTime(raw: any) {
-  const d = toDate(raw);
-  if (!d) return "";
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+function formatTimeMs(ms: number) {
+  if (!ms) return "";
+  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-function formatDayLabel(d: Date) {
+function formatDayLabelMs(ms: number) {
+  const d = new Date(ms);
   const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const that = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const that = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
 
-  const diffDays = Math.round((today.getTime() - that.getTime()) / 86400000);
-
+  const diffDays = Math.round((today - that) / 86400000);
   if (diffDays === 0) return "Today";
   if (diffDays === 1) return "Yesterday";
 
-  return d.toLocaleDateString([], {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-  });
+  return d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
 }
 
 export default function MatchChatScreen() {
@@ -109,8 +112,14 @@ export default function MatchChatScreen() {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
 
-  // ✅ Correctly typed FlatList ref
   const listRef = useRef<FlatList<ChatMessage>>(null);
+  const didInitialScroll = useRef(false);
+
+  // ✅ Freeze a stable timestamp per msgId so order/clustering never flips
+  const stableMsByIdRef = useRef<Map<string, number>>(new Map());
+
+  // If you ever decide you want meta on the LAST message instead, set this to false.
+  const META_ON_FIRST_MESSAGE_IN_CLUSTER = false;
 
   // Load teamId from match doc (needed for writing + rules)
   useEffect(() => {
@@ -153,7 +162,7 @@ export default function MatchChatScreen() {
     };
   }, [matchIdStr]);
 
-  // Live subscribe to messages (newest first for FlatList + inverted)
+  // Live subscribe to messages (query DESC for index, but we sort stably in state)
   useEffect(() => {
     if (!matchIdStr) return;
 
@@ -168,10 +177,24 @@ export default function MatchChatScreen() {
     const unsub = onSnapshot(
       q,
       (snap) => {
+        const stableMap = stableMsByIdRef.current;
+
+        const nextIds = new Set<string>();
+
         const list: ChatMessage[] = snap.docs.map((d) => {
-          const data = d.data() as any;
+          const data = d.data({ serverTimestamps: "estimate" }) as any;
+
+          const id = d.id;
+          nextIds.add(id);
+
+          const candidateMs = tsToMs(data.createdAt) || Date.now();
+
+          // ✅ Freeze first-seen stable timestamp
+          const stableMs = stableMap.has(id) ? (stableMap.get(id) as number) : candidateMs;
+          if (!stableMap.has(id)) stableMap.set(id, stableMs);
+
           return {
-            id: d.id,
+            id,
             matchId: String(data.matchId ?? ""),
             teamId: String(data.teamId ?? ""),
             userId: String(data.userId ?? ""),
@@ -179,7 +202,20 @@ export default function MatchChatScreen() {
             text: String(data.text ?? ""),
             photoURL: (data.photoURL as string) ?? null,
             createdAt: data.createdAt,
+            stableMs,
           };
+        });
+
+        // prune old ids (keeps memory tiny)
+        for (const k of stableMap.keys()) {
+          if (!nextIds.has(k)) stableMap.delete(k);
+        }
+
+        // ✅ Stable sort: oldest -> newest, tie-break by id
+        list.sort((a, b) => {
+          const dt = a.stableMs - b.stableMs;
+          if (dt !== 0) return dt;
+          return a.id.localeCompare(b.id);
         });
 
         setMessages(list);
@@ -189,6 +225,17 @@ export default function MatchChatScreen() {
 
     return () => unsub();
   }, [matchIdStr]);
+
+  // Initial scroll to bottom once
+  useEffect(() => {
+    if (didInitialScroll.current) return;
+    if (messages.length === 0) return;
+
+    requestAnimationFrame(() => {
+      listRef.current?.scrollToEnd({ animated: false });
+      didInitialScroll.current = true;
+    });
+  }, [messages.length]);
 
   const canSend = useMemo(() => {
     return (
@@ -244,9 +291,8 @@ export default function MatchChatScreen() {
 
       setText("");
 
-      // inverted list => offset 0 is "bottom"
       requestAnimationFrame(() => {
-        listRef.current?.scrollToOffset({ offset: 0, animated: true });
+        listRef.current?.scrollToEnd({ animated: true });
       });
     } catch (e) {
       console.error("Send message error:", e);
@@ -330,7 +376,7 @@ export default function MatchChatScreen() {
           style={{ flex: 1 }}
           contentContainerStyle={styles.messagesContainer}
           data={messages}
-          inverted
+          inverted={false}
           keyExtractor={(m) => m.id}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="on-drag"
@@ -338,44 +384,53 @@ export default function MatchChatScreen() {
           initialNumToRender={24}
           maxToRenderPerBatch={24}
           windowSize={9}
-          ListEmptyComponent={
-            <Text style={styles.emptyText}>No messages yet. Say hi 👋</Text>
-          }
+          ListEmptyComponent={<Text style={styles.emptyText}>No messages yet. Say hi 👋</Text>}
           ListFooterComponent={<View style={{ height: 8 }} />}
           renderItem={({ item, index }) => {
             const mine = item.userId === user?.uid;
             const initials = initialsFromName(item.displayName);
 
-            // Because query is createdAt DESC:
-            // - messages[index - 1] is NEWER
-            // - messages[index + 1] is OLDER
-            const prev = messages[index - 1]; // newer message
-            const next = messages[index + 1]; // older message (used for date separators)
+            // messages are ASC (oldest -> newest)
+            const prev = messages[index - 1]; // older
+            const next = messages[index + 1]; // newer
 
-            const tCur = toDate(item.createdAt);
-            const tPrev = toDate(prev?.createdAt);
-            const tNext = toDate(next?.createdAt);
+            const tCur = item.stableMs;
+            const tPrev = prev?.stableMs ?? 0;
+            const tNext = next?.stableMs ?? 0;
 
-            // ✅ Cluster with the previous (newer) message
-            const sameSenderAsPrev = !!prev?.userId && prev.userId === item.userId;
-            const withinClusterWithPrev =
-              tCur && tPrev ? minutesDiff(tCur, tPrev) <= CLUSTER_MINUTES : false;
+            const joinsPrev =
+              !!prev &&
+              prev.userId === item.userId &&
+              tCur > 0 &&
+              tPrev > 0 &&
+              minutesDiffMs(tCur, tPrev) <= CLUSTER_MINUTES;
 
-            // ✅ Show avatar/name/time on the NEWEST bubble in a cluster (bottom bubble)
-            // That means: show meta when this message does NOT belong to the same cluster as prev.
-            const showMeta = !prev || !sameSenderAsPrev || !withinClusterWithPrev;
+            const joinsNext =
+              !!next &&
+              next.userId === item.userId &&
+              tCur > 0 &&
+              tNext > 0 &&
+              minutesDiffMs(tCur, tNext) <= CLUSTER_MINUTES;
 
-            // Date separator when we cross into a different day (boundary between current and older)
-            const showDateSeparator = !!tCur && (!tNext || !isSameDay(tCur, tNext));
+            const isClusterStart = !joinsPrev; // first/oldest message in cluster
+            const isClusterEnd = !joinsNext; // last/newest message in cluster
 
-            const timeLabel = tCur ? formatTime(item.createdAt) : "";
+            const showMeta = META_ON_FIRST_MESSAGE_IN_CLUSTER ? isClusterStart : isClusterEnd;
+
+            // date separator on first message of a day (compares with prev / older)
+            const showDateSeparator = tCur > 0 && (!prev || !isSameDayMs(tCur, tPrev));
+
+            const timeLabel = showMeta ? formatTimeMs(tCur) : "";
+
+            // ✅ dynamic spacing so clustered messages visually “stick”
+            const spacing = joinsPrev ? 3 : 10;
 
             return (
-              <View>
+              <View style={{ marginTop: spacing }}>
                 {showDateSeparator && (
                   <View style={styles.dateSepWrap}>
                     <View style={styles.dateSepPill}>
-                      <Text style={styles.dateSepText}>{formatDayLabel(tCur!)}</Text>
+                      <Text style={styles.dateSepText}>{formatDayLabelMs(tCur)}</Text>
                     </View>
                   </View>
                 )}
@@ -386,10 +441,7 @@ export default function MatchChatScreen() {
                     showMeta ? (
                       <View style={styles.avatarWrap}>
                         {item.photoURL ? (
-                          <Image
-                            source={{ uri: item.photoURL }}
-                            style={styles.avatarImg}
-                          />
+                          <Image source={{ uri: item.photoURL }} style={styles.avatarImg} />
                         ) : (
                           <View style={styles.avatarFallback}>
                             <Text style={styles.avatarText}>{initials}</Text>
@@ -403,21 +455,14 @@ export default function MatchChatScreen() {
                     <View style={styles.avatarSpacer} />
                   )}
 
-                  <View
-                    style={[
-                      styles.bubble,
-                      mine ? styles.bubbleMine : styles.bubbleOther,
-                      !showMeta && !mine ? { marginLeft: 0 } : null,
-                    ]}
-                  >
+                  <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleOther]}>
                     {!mine && showMeta && (
                       <Text style={styles.bubbleName}>{item.displayName}</Text>
                     )}
+
                     <Text style={styles.bubbleText}>{item.text}</Text>
 
-                    {showMeta && !!timeLabel && (
-                      <Text style={styles.timeText}>{timeLabel}</Text>
-                    )}
+                    {showMeta && !!timeLabel && <Text style={styles.timeText}>{timeLabel}</Text>}
                   </View>
 
                   {/* Right avatar (mine) */}
@@ -425,10 +470,7 @@ export default function MatchChatScreen() {
                     showMeta ? (
                       <View style={styles.avatarWrap}>
                         {item.photoURL ? (
-                          <Image
-                            source={{ uri: item.photoURL }}
-                            style={styles.avatarImg}
-                          />
+                          <Image source={{ uri: item.photoURL }} style={styles.avatarImg} />
                         ) : (
                           <View style={styles.avatarFallback}>
                             <Text style={styles.avatarText}>{initials}</Text>
@@ -498,7 +540,6 @@ const styles = StyleSheet.create({
   messagesContainer: {
     padding: 16,
     paddingBottom: 8,
-    gap: 10,
   },
 
   emptyText: { color: "#666" },

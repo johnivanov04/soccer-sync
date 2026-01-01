@@ -1,22 +1,8 @@
 // app/(app)/(tabs)/matches.tsx
 import { useRouter } from "expo-router";
-import {
-  collection,
-  doc,
-  onSnapshot,
-  orderBy,
-  query,
-  where,
-} from "firebase/firestore";
+import { collection, doc, onSnapshot, orderBy, query, where } from "firebase/firestore";
 import React, { useEffect, useState } from "react";
-import {
-  Button,
-  FlatList,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
-} from "react-native";
+import { Button, FlatList, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
 
@@ -38,6 +24,12 @@ type Match = {
   status?: MatchStatus;
   rsvpDeadline?: any;
   createdBy?: string;
+
+  // ✅ new (written by Cloud Function)
+  lastMessageAt?: any;
+  lastMessageText?: string;
+  lastMessageSenderId?: string;
+  lastMessageSenderName?: string;
 };
 
 type MyRsvpMini = {
@@ -50,6 +42,13 @@ function toDate(raw: any): Date {
   if (!raw) return new Date();
   if (typeof raw?.toDate === "function") return raw.toDate();
   return new Date(raw);
+}
+
+function toDateOrNull(raw: any): Date | null {
+  if (!raw) return null;
+  if (typeof raw?.toDate === "function") return raw.toDate();
+  const d = new Date(raw);
+  return Number.isFinite(d.getTime()) ? d : null;
 }
 
 function normalizeStatus(s?: string) {
@@ -125,6 +124,20 @@ function getMyRsvpBadge(r?: MyRsvpMini | null) {
   return { label: "⬜ No", variant: "no" as const };
 }
 
+// ✅ FIX: No hooks inside renderItem — use a plain helper
+function formatPreviewTimeFromDate(d: Date | null): string {
+  if (!d) return "";
+  const now = new Date();
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+
+  return sameDay
+    ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : d.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
 export default function MatchesScreen() {
   const router = useRouter();
   const { user } = useAuth();
@@ -135,6 +148,9 @@ export default function MatchesScreen() {
 
   const [matches, setMatches] = useState<Match[]>([]);
   const [myRsvpByMatchId, setMyRsvpByMatchId] = useState<Record<string, MyRsvpMini>>({});
+
+  // ✅ per-match lastReadAt
+  const [lastReadByMatchId, setLastReadByMatchId] = useState<Record<string, any>>({});
 
   // 1) Subscribe to current user's teamId
   useEffect(() => {
@@ -153,8 +169,7 @@ export default function MatchesScreen() {
       (snap) => {
         if (snap.exists()) {
           const data = snap.data() as any;
-          const nextTeamId =
-            data.teamId ?? data.teamCode ?? data.team ?? data.team_id ?? null;
+          const nextTeamId = data.teamId ?? data.teamCode ?? data.team ?? data.team_id ?? null;
 
           setTeamId(nextTeamId ?? null);
           setTeamName(data.teamName ?? null);
@@ -210,11 +225,7 @@ export default function MatchesScreen() {
     }
 
     const matchesCol = collection(db, "matches");
-    const q = query(
-      matchesCol,
-      where("teamId", "==", teamId),
-      orderBy("startDateTime", "asc")
-    );
+    const q = query(matchesCol, where("teamId", "==", teamId), orderBy("startDateTime", "asc"));
 
     const unsub = onSnapshot(
       q,
@@ -233,7 +244,7 @@ export default function MatchesScreen() {
     return () => unsub();
   }, [teamId]);
 
-  // 4) Subscribe to MY RSVPs (to show per-match badge)
+  // 4) Subscribe to MY RSVPs
   useEffect(() => {
     if (!user?.uid) {
       setMyRsvpByMatchId({});
@@ -268,6 +279,30 @@ export default function MatchesScreen() {
     return () => unsub();
   }, [user?.uid]);
 
+  // 5) Subscribe to chatReads
+  useEffect(() => {
+    if (!user?.uid) {
+      setLastReadByMatchId({});
+      return;
+    }
+
+    const readsCol = collection(db, "users", user.uid, "chatReads");
+    const unsub = onSnapshot(
+      readsCol,
+      (snap) => {
+        const map: Record<string, any> = {};
+        snap.docs.forEach((d) => {
+          const data = d.data() as any;
+          map[d.id] = data?.lastReadAt ?? null;
+        });
+        setLastReadByMatchId(map);
+      },
+      (err) => console.error("chatReads subscription error:", err)
+    );
+
+    return () => unsub();
+  }, [user?.uid]);
+
   const renderItem = ({ item }: { item: Match }) => {
     const date = toDate(item.startDateTime);
     const chip = getChip(item);
@@ -292,9 +327,25 @@ export default function MatchesScreen() {
         ? `Starts in ${formatCountdown(msUntilStart)}`
         : "In progress / started";
 
+    // ✅ unread logic: lastMessageAt > lastReadAt AND not sent by me
+    const lastMsgAt = toDateOrNull(item.lastMessageAt);
+    const lastReadAt = toDateOrNull(lastReadByMatchId[item.id]);
+
+    const unread =
+      !!lastMsgAt &&
+      item.lastMessageSenderId !== user?.uid &&
+      (!lastReadAt || lastReadAt.getTime() < lastMsgAt.getTime());
+
+    const previewText = (item.lastMessageText ?? "").trim();
+    const senderLabel =
+      item.lastMessageSenderId === user?.uid ? "You" : item.lastMessageSenderName ?? "Someone";
+
+    // ✅ FIXED: no hook — just compute
+    const previewTime = formatPreviewTimeFromDate(lastMsgAt);
+
     return (
       <TouchableOpacity
-        style={styles.card}
+        style={[styles.card, unread && styles.cardUnread]}
         onPress={() =>
           router.push({
             pathname: "/(app)/match/[matchId]",
@@ -308,8 +359,11 @@ export default function MatchesScreen() {
             {date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
           </Text>
 
-          <View style={[styles.chip, (styles as any)[`chip_${chip.variant}`]]}>
-            <Text style={styles.chipText}>{chip.label}</Text>
+          <View style={styles.topRight}>
+            {unread && <View style={styles.unreadDot} />}
+            <View style={[styles.chip, (styles as any)[`chip_${chip.variant}`]]}>
+              <Text style={styles.chipText}>{chip.label}</Text>
+            </View>
           </View>
         </View>
 
@@ -321,6 +375,18 @@ export default function MatchesScreen() {
           <Text style={styles.desc} numberOfLines={2}>
             {desc}
           </Text>
+        )}
+
+        {/* ✅ Chat preview */}
+        {previewText ? (
+          <View style={styles.chatRow}>
+            <Text style={styles.chatPreview} numberOfLines={1}>
+              {senderLabel}: {previewText}
+            </Text>
+            {!!previewTime && <Text style={styles.chatTime}>{previewTime}</Text>}
+          </View>
+        ) : (
+          <Text style={styles.chatEmpty}>No chat messages yet</Text>
         )}
 
         <View style={styles.metaRow}>
@@ -376,7 +442,9 @@ export default function MatchesScreen() {
       />
 
       {matches.length === 0 && (
-        <Text style={{ marginTop: 16, textAlign: "center" }}>No matches yet. Create one!</Text>
+        <Text style={{ marginTop: 16, textAlign: "center" }}>
+          No matches yet. Create one!
+        </Text>
       )}
     </View>
   );
@@ -402,6 +470,10 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     borderColor: "#ddd",
     borderWidth: 1,
+    backgroundColor: "#fff",
+  },
+  cardUnread: {
+    borderColor: "#2b4cff",
   },
 
   cardTopRow: {
@@ -411,22 +483,44 @@ const styles = StyleSheet.create({
     gap: 10,
   },
 
+  topRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+
+  unreadDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 999,
+    backgroundColor: "#2b4cff",
+  },
+
   title: { fontWeight: "bold", flex: 1 },
   startHint: { marginTop: 6, color: "#666" },
-
   location: { marginTop: 6, color: "#555" },
 
-  desc: {
-    marginTop: 6,
-    color: "#444",
-    lineHeight: 18,
+  desc: { marginTop: 6, color: "#444", lineHeight: 18 },
+
+  chatRow: {
+    marginTop: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
   },
+  chatPreview: {
+    flex: 1,
+    color: "#222",
+    fontWeight: "600",
+  },
+  chatTime: { color: "#666", fontSize: 12, fontWeight: "600" },
+  chatEmpty: { marginTop: 8, color: "#777" },
 
   metaRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    marginTop: 8,
+    marginTop: 10,
     flexWrap: "wrap",
   },
 
@@ -443,11 +537,7 @@ const styles = StyleSheet.create({
 
   waitlistText: { color: "#7a4d00" },
 
-  chip: {
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-    borderRadius: 999,
-  },
+  chip: { paddingVertical: 4, paddingHorizontal: 10, borderRadius: 999 },
   chipText: { fontSize: 12, fontWeight: "700" },
 
   chip_ontrack: { backgroundColor: "#DFF7E3" },
@@ -459,15 +549,8 @@ const styles = StyleSheet.create({
   chip_closed: { backgroundColor: "#E9E3FF" },
   chip_scheduled: { backgroundColor: "#EDEDED" },
 
-  myBadge: {
-    paddingVertical: 3,
-    paddingHorizontal: 8,
-    borderRadius: 999,
-  },
-  myBadgeText: {
-    fontSize: 12,
-    fontWeight: "700",
-  },
+  myBadge: { paddingVertical: 3, paddingHorizontal: 8, borderRadius: 999 },
+  myBadgeText: { fontSize: 12, fontWeight: "700" },
   myBadge_confirmed: { backgroundColor: "#DFF7E3" },
   myBadge_waitlisted: { backgroundColor: "#FFE7B8" },
   myBadge_maybe: { backgroundColor: "#E6F4FF" },
