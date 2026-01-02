@@ -1,4 +1,5 @@
 // app/(app)/match/chat/[matchId].tsx
+import { useFocusEffect } from "@react-navigation/native";
 import { Image } from "expo-image";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import {
@@ -41,7 +42,7 @@ type ChatMessage = {
   photoURL?: string | null;
   createdAt?: any;
 
-  // ✅ frozen per message id so clustering never “switches back”
+  // stable timestamp for grouping
   stableMs: number;
 };
 
@@ -111,8 +112,8 @@ export default function MatchChatScreen() {
   const [loading, setLoading] = useState(true);
   const [matchTeamId, setMatchTeamId] = useState<string | null>(null);
 
-  // ✅ NEW: match-level sequence for unread counts
-  const [matchLastSeq, setMatchLastSeq] = useState<number>(0);
+  // ✅ NEW: keep latest seq from matches/{matchId}
+  const [lastMessageSeq, setLastMessageSeq] = useState<number>(0);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [text, setText] = useState("");
@@ -121,35 +122,33 @@ export default function MatchChatScreen() {
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const didInitialScroll = useRef(false);
 
-  // ✅ Freeze a stable timestamp per msgId so order/clustering never flips
+  // Freeze stable timestamps per message id
   const stableMsByIdRef = useRef<Map<string, number>>(new Map());
 
-  // If you ever decide you want meta on the FIRST message instead, set this to true.
   const META_ON_FIRST_MESSAGE_IN_CLUSTER = false;
+  const CLUSTER_MINUTES = 5;
 
   // -------------------------------
-  // ✅ Mark-as-read plumbing
+  // ✅ Mark-as-read (SEQ + TIME)
   // -------------------------------
   const markReadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const markChatReadNow = useCallback(async () => {
     if (!user?.uid || !matchIdStr) return;
+
     try {
       const ref = doc(db, "users", user.uid, "chatReads", matchIdStr);
 
-      await setDoc(
-        ref,
-        {
-          lastReadAt: serverTimestamp(),
-          lastReadSeq: matchLastSeq ?? 0,
-          updatedAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
+      // ✅ IMPORTANT: write lastReadSeq so your matches.tsx unreadCount becomes 0
+      await setDoc(ref, {
+        lastReadAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+        lastReadSeq: Number.isFinite(lastMessageSeq) ? lastMessageSeq : 0,
+      });
     } catch (e) {
       console.warn("markChatReadNow failed:", e);
     }
-  }, [user?.uid, matchIdStr, matchLastSeq]);
+  }, [user?.uid, matchIdStr, lastMessageSeq]);
 
   const scheduleMarkChatRead = useCallback(() => {
     if (!user?.uid || !matchIdStr) return;
@@ -157,7 +156,7 @@ export default function MatchChatScreen() {
     if (markReadTimerRef.current) clearTimeout(markReadTimerRef.current);
     markReadTimerRef.current = setTimeout(() => {
       markChatReadNow();
-    }, 350);
+    }, 250);
   }, [user?.uid, matchIdStr, markChatReadNow]);
 
   useEffect(() => {
@@ -165,6 +164,14 @@ export default function MatchChatScreen() {
       if (markReadTimerRef.current) clearTimeout(markReadTimerRef.current);
     };
   }, []);
+
+  // ✅ When screen is opened/focused, mark read
+  useFocusEffect(
+    useCallback(() => {
+      scheduleMarkChatRead();
+      return () => {};
+    }, [scheduleMarkChatRead])
+  );
 
   // Mark read when app returns to foreground
   useEffect(() => {
@@ -174,12 +181,12 @@ export default function MatchChatScreen() {
     return () => sub.remove();
   }, [scheduleMarkChatRead]);
 
-  // ✅ Live subscribe to match doc (teamId + lastMessageSeq)
+  // ✅ Subscribe to match doc to get teamId + lastMessageSeq
   useEffect(() => {
     if (!matchIdStr) {
       setLoading(false);
       setMatchTeamId(null);
-      setMatchLastSeq(0);
+      setLastMessageSeq(0);
       return;
     }
 
@@ -189,23 +196,23 @@ export default function MatchChatScreen() {
       (snap) => {
         if (!snap.exists()) {
           setMatchTeamId(null);
-          setMatchLastSeq(0);
+          setLastMessageSeq(0);
           setLoading(false);
           return;
         }
 
         const data = snap.data() as any;
-        const tid = data?.teamId ? String(data.teamId) : null;
-        const seq = typeof data?.lastMessageSeq === "number" ? data.lastMessageSeq : 0;
+        setMatchTeamId(data?.teamId ? String(data.teamId) : null);
 
-        setMatchTeamId(tid);
-        setMatchLastSeq(seq);
+        const seq = typeof data?.lastMessageSeq === "number" ? data.lastMessageSeq : 0;
+        setLastMessageSeq(seq);
+
         setLoading(false);
       },
       (err) => {
-        console.error("Error listening to match for chat:", err);
+        console.error("match doc listener error:", err);
         setMatchTeamId(null);
-        setMatchLastSeq(0);
+        setLastMessageSeq(0);
         setLoading(false);
       }
     );
@@ -213,7 +220,13 @@ export default function MatchChatScreen() {
     return () => unsub();
   }, [matchIdStr]);
 
-  // Live subscribe to messages (query DESC for index, but we sort stably in state)
+  // ✅ When seq updates while you're in the chat (new message), mark read again
+  useEffect(() => {
+    if (!matchIdStr) return;
+    scheduleMarkChatRead();
+  }, [lastMessageSeq, matchIdStr, scheduleMarkChatRead]);
+
+  // Subscribe to messages
   useEffect(() => {
     if (!matchIdStr) return;
 
@@ -239,7 +252,6 @@ export default function MatchChatScreen() {
 
           const candidateMs = tsToMs(data.createdAt) || Date.now();
 
-          // ✅ Freeze first-seen stable timestamp
           const stableMs = stableMap.has(id) ? (stableMap.get(id) as number) : candidateMs;
           if (!stableMap.has(id)) stableMap.set(id, stableMs);
 
@@ -256,12 +268,11 @@ export default function MatchChatScreen() {
           };
         });
 
-        // prune old ids (keeps memory tiny)
         for (const k of stableMap.keys()) {
           if (!nextIds.has(k)) stableMap.delete(k);
         }
 
-        // ✅ Stable sort: oldest -> newest, tie-break by id
+        // oldest -> newest
         list.sort((a, b) => {
           const dt = a.stableMs - b.stableMs;
           if (dt !== 0) return dt;
@@ -276,7 +287,7 @@ export default function MatchChatScreen() {
     return () => unsub();
   }, [matchIdStr]);
 
-  // Initial scroll to bottom once
+  // Initial scroll
   useEffect(() => {
     if (didInitialScroll.current) return;
     if (messages.length === 0) return;
@@ -286,12 +297,6 @@ export default function MatchChatScreen() {
       didInitialScroll.current = true;
     });
   }, [messages.length]);
-
-  // ✅ Mark read when opening chat + when latest message changes + when match seq changes
-  const lastMsgId = messages[messages.length - 1]?.id ?? null;
-  useEffect(() => {
-    scheduleMarkChatRead();
-  }, [scheduleMarkChatRead, lastMsgId, matchLastSeq]);
 
   const canSend = useMemo(() => {
     return (
@@ -311,15 +316,11 @@ export default function MatchChatScreen() {
 
     const body = text.trim();
     if (!body) return;
-    if (body.length > 500) {
-      Alert.alert("Too long", "Please keep messages under 500 characters.");
-      return;
-    }
+    if (body.length > 500) return Alert.alert("Too long", "Keep under 500 characters.");
 
     try {
       setSending(true);
 
-      // Best-effort pull from users/{uid}
       let displayName = user.email ?? "Player";
       let photoURL: string | null = null;
 
@@ -351,7 +352,7 @@ export default function MatchChatScreen() {
         listRef.current?.scrollToEnd({ animated: true });
       });
 
-      // ✅ after sending, you are definitely “caught up”
+      // ✅ caught up
       scheduleMarkChatRead();
     } catch (e) {
       console.error("Send message error:", e);
@@ -368,11 +369,9 @@ export default function MatchChatScreen() {
       <SafeAreaView style={styles.safe} edges={["top"]}>
         <View style={styles.container}>
           <Text>Missing match id.</Text>
-          <View style={{ marginTop: 12 }}>
-            <TouchableOpacity style={styles.backBtn} onPress={handleBack}>
-              <Text style={styles.backBtnText}>Back</Text>
-            </TouchableOpacity>
-          </View>
+          <TouchableOpacity style={styles.backBtn} onPress={handleBack}>
+            <Text style={styles.backBtnText}>Back</Text>
+          </TouchableOpacity>
         </View>
       </SafeAreaView>
     );
@@ -383,11 +382,6 @@ export default function MatchChatScreen() {
       <SafeAreaView style={styles.safe} edges={["top"]}>
         <View style={styles.container}>
           <Text>Loading chat...</Text>
-          <View style={{ marginTop: 12 }}>
-            <TouchableOpacity style={styles.backBtn} onPress={handleBack}>
-              <Text style={styles.backBtnText}>Back</Text>
-            </TouchableOpacity>
-          </View>
         </View>
       </SafeAreaView>
     );
@@ -398,17 +392,13 @@ export default function MatchChatScreen() {
       <SafeAreaView style={styles.safe} edges={["top"]}>
         <View style={styles.container}>
           <Text>Match not found.</Text>
-          <View style={{ marginTop: 12 }}>
-            <TouchableOpacity style={styles.backBtn} onPress={handleBack}>
-              <Text style={styles.backBtnText}>Back</Text>
-            </TouchableOpacity>
-          </View>
+          <TouchableOpacity style={styles.backBtn} onPress={handleBack}>
+            <Text style={styles.backBtnText}>Back</Text>
+          </TouchableOpacity>
         </View>
       </SafeAreaView>
     );
   }
-
-  const CLUSTER_MINUTES = 5;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -417,7 +407,6 @@ export default function MatchChatScreen() {
         behavior={Platform.OS === "ios" ? "padding" : undefined}
         keyboardVerticalOffset={Platform.OS === "ios" ? 64 : 0}
       >
-        {/* Header */}
         <View style={styles.header}>
           <TouchableOpacity
             onPress={handleBack}
@@ -435,23 +424,16 @@ export default function MatchChatScreen() {
           style={{ flex: 1 }}
           contentContainerStyle={styles.messagesContainer}
           data={messages}
-          inverted={false}
           keyExtractor={(m) => m.id}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="on-drag"
-          removeClippedSubviews={Platform.OS === "android"}
-          initialNumToRender={24}
-          maxToRenderPerBatch={24}
-          windowSize={9}
           ListEmptyComponent={<Text style={styles.emptyText}>No messages yet. Say hi 👋</Text>}
-          ListFooterComponent={<View style={{ height: 8 }} />}
           renderItem={({ item, index }) => {
             const mine = item.userId === user?.uid;
             const initials = initialsFromName(item.displayName);
 
-            // messages are ASC (oldest -> newest)
-            const prev = messages[index - 1]; // older
-            const next = messages[index + 1]; // newer
+            const prev = messages[index - 1];
+            const next = messages[index + 1];
 
             const tCur = item.stableMs;
             const tPrev = prev?.stableMs ?? 0;
@@ -471,17 +453,13 @@ export default function MatchChatScreen() {
               tNext > 0 &&
               minutesDiffMs(tCur, tNext) <= CLUSTER_MINUTES;
 
-            const isClusterStart = !joinsPrev; // first/oldest message in cluster
-            const isClusterEnd = !joinsNext; // last/newest message in cluster
+            const isClusterStart = !joinsPrev;
+            const isClusterEnd = !joinsNext;
 
             const showMeta = META_ON_FIRST_MESSAGE_IN_CLUSTER ? isClusterStart : isClusterEnd;
 
-            // date separator on first message of a day (compares with prev / older)
             const showDateSeparator = tCur > 0 && (!prev || !isSameDayMs(tCur, tPrev));
-
             const timeLabel = showMeta ? formatTimeMs(tCur) : "";
-
-            // ✅ dynamic spacing so clustered messages visually “stick”
             const spacing = joinsPrev ? 3 : 10;
 
             return (
@@ -495,7 +473,6 @@ export default function MatchChatScreen() {
                 )}
 
                 <View style={[styles.row, mine ? styles.rowMine : styles.rowOther]}>
-                  {/* Left avatar (others) */}
                   {!mine ? (
                     showMeta ? (
                       <View style={styles.avatarWrap}>
@@ -515,14 +492,15 @@ export default function MatchChatScreen() {
                   )}
 
                   <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleOther]}>
-                    {!mine && showMeta && <Text style={styles.bubbleName}>{item.displayName}</Text>}
+                    {!mine && showMeta && (
+                      <Text style={styles.bubbleName}>{item.displayName}</Text>
+                    )}
 
                     <Text style={styles.bubbleText}>{item.text}</Text>
 
                     {showMeta && !!timeLabel && <Text style={styles.timeText}>{timeLabel}</Text>}
                   </View>
 
-                  {/* Right avatar (mine) */}
                   {mine ? (
                     showMeta ? (
                       <View style={styles.avatarWrap}>
@@ -586,25 +564,13 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: "#ddd",
   },
-  backText: {
-    fontSize: 16,
-    color: "#007AFF",
-    fontWeight: "600",
-    width: 60,
-  },
+  backText: { fontSize: 16, color: "#007AFF", fontWeight: "600", width: 60 },
   headerTitle: { fontSize: 18, fontWeight: "700" },
 
-  messagesContainer: {
-    padding: 16,
-    paddingBottom: 8,
-  },
-
+  messagesContainer: { padding: 16, paddingBottom: 8 },
   emptyText: { color: "#666" },
 
-  row: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-  },
+  row: { flexDirection: "row", alignItems: "flex-end" },
   rowMine: { justifyContent: "flex-end" },
   rowOther: { justifyContent: "flex-start" },
 
@@ -615,11 +581,7 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     marginHorizontal: 8,
   },
-  avatarImg: {
-    width: AVATAR,
-    height: AVATAR,
-    borderRadius: AVATAR / 2,
-  },
+  avatarImg: { width: AVATAR, height: AVATAR, borderRadius: AVATAR / 2 },
   avatarFallback: {
     width: AVATAR,
     height: AVATAR,
@@ -628,60 +590,19 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  avatarText: {
-    fontSize: 12,
-    fontWeight: "800",
-    color: "#2b4cff",
-  },
-  avatarSpacer: {
-    width: AVATAR,
-    height: AVATAR,
-    marginHorizontal: 8,
-    opacity: 0,
-  },
+  avatarText: { fontSize: 12, fontWeight: "800", color: "#2b4cff" },
+  avatarSpacer: { width: AVATAR, height: AVATAR, marginHorizontal: 8, opacity: 0 },
 
-  bubble: {
-    maxWidth: "70%",
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-    borderRadius: 12,
-  },
-  bubbleMine: {
-    backgroundColor: "#D7EBFF",
-  },
-  bubbleOther: {
-    backgroundColor: "#F2F2F2",
-  },
-  bubbleName: {
-    fontSize: 12,
-    fontWeight: "700",
-    marginBottom: 4,
-    color: "#333",
-  },
+  bubble: { maxWidth: "70%", paddingVertical: 8, paddingHorizontal: 10, borderRadius: 12 },
+  bubbleMine: { backgroundColor: "#D7EBFF" },
+  bubbleOther: { backgroundColor: "#F2F2F2" },
+  bubbleName: { fontSize: 12, fontWeight: "700", marginBottom: 4, color: "#333" },
   bubbleText: { color: "#111" },
-  timeText: {
-    marginTop: 6,
-    fontSize: 11,
-    color: "#666",
-    alignSelf: "flex-end",
-  },
+  timeText: { marginTop: 6, fontSize: 11, color: "#666", alignSelf: "flex-end" },
 
-  dateSepWrap: {
-    alignItems: "center",
-    marginBottom: 6,
-    marginTop: 2,
-  },
-  dateSepPill: {
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-    borderRadius: 999,
-    backgroundColor: "#eee",
-  },
-  dateSepText: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: "#666",
-  },
+  dateSepWrap: { alignItems: "center", marginBottom: 6, marginTop: 2 },
+  dateSepPill: { paddingVertical: 4, paddingHorizontal: 10, borderRadius: 999, backgroundColor: "#eee" },
+  dateSepText: { fontSize: 12, fontWeight: "700", color: "#666" },
 
   composer: {
     flexDirection: "row",
@@ -709,13 +630,8 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: "#007AFF",
   },
-  sendButtonDisabled: {
-    backgroundColor: "#9cc7ff",
-  },
-  sendButtonText: {
-    color: "#fff",
-    fontWeight: "800",
-  },
+  sendButtonDisabled: { backgroundColor: "#9cc7ff" },
+  sendButtonText: { color: "#fff", fontWeight: "800" },
 
   backBtn: {
     paddingVertical: 10,
@@ -723,6 +639,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     backgroundColor: "#eee",
     alignSelf: "flex-start",
+    marginTop: 12,
   },
   backBtnText: { fontWeight: "700" },
 });
