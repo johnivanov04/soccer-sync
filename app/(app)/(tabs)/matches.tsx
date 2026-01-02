@@ -1,7 +1,7 @@
 // app/(app)/(tabs)/matches.tsx
 import { useRouter } from "expo-router";
 import { collection, doc, onSnapshot, orderBy, query, where } from "firebase/firestore";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Button, FlatList, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
@@ -25,7 +25,7 @@ type Match = {
   rsvpDeadline?: any;
   createdBy?: string;
 
-  // ✅ new (written by Cloud Function)
+  // written by Cloud Function
   lastMessageAt?: any;
   lastMessageText?: string;
   lastMessageSenderId?: string;
@@ -51,8 +51,23 @@ function toDateOrNull(raw: any): Date | null {
   return Number.isFinite(d.getTime()) ? d : null;
 }
 
+function tsToMs(raw: any): number {
+  if (!raw) return 0;
+  if (typeof raw?.toMillis === "function") return raw.toMillis();
+  if (typeof raw?.toDate === "function") return raw.toDate().getTime();
+  if (raw instanceof Date) return raw.getTime();
+  if (typeof raw === "number") return raw;
+  const d = new Date(raw);
+  return Number.isFinite(d.getTime()) ? d.getTime() : 0;
+}
+
 function normalizeStatus(s?: string) {
   return (s ?? "scheduled").toLowerCase();
+}
+
+function isArchivedStatus(status?: string) {
+  const st = normalizeStatus(status);
+  return st === "played" || st === "cancelled" || st === "canceled";
 }
 
 function formatCountdown(ms: number) {
@@ -124,7 +139,7 @@ function getMyRsvpBadge(r?: MyRsvpMini | null) {
   return { label: "⬜ No", variant: "no" as const };
 }
 
-// ✅ FIX: No hooks inside renderItem — use a plain helper
+// No hooks in renderItem — plain helper
 function formatPreviewTimeFromDate(d: Date | null): string {
   if (!d) return "";
   const now = new Date();
@@ -149,7 +164,7 @@ export default function MatchesScreen() {
   const [matches, setMatches] = useState<Match[]>([]);
   const [myRsvpByMatchId, setMyRsvpByMatchId] = useState<Record<string, MyRsvpMini>>({});
 
-  // ✅ per-match lastReadAt
+  // per-match lastReadAt
   const [lastReadByMatchId, setLastReadByMatchId] = useState<Record<string, any>>({});
 
   // 1) Subscribe to current user's teamId
@@ -217,7 +232,7 @@ export default function MatchesScreen() {
     return () => unsub();
   }, [teamId]);
 
-  // 3) Subscribe to matches for team
+  // 3) Subscribe to matches for team (keep this query simple; we sort client-side)
   useEffect(() => {
     if (!teamId) {
       setMatches([]);
@@ -303,6 +318,44 @@ export default function MatchesScreen() {
     return () => unsub();
   }, [user?.uid]);
 
+  /**
+   * ✅ OPTION #2: sort matches like a chat list
+   * - Scheduled first, played/cancelled last
+   * - Scheduled:
+   *    - with chat: lastMessageAt DESC
+   *    - no chat: startDateTime ASC
+   */
+  const sortedMatches = useMemo(() => {
+    const copy = [...matches];
+
+    copy.sort((a, b) => {
+      const aArchived = isArchivedStatus(a.status);
+      const bArchived = isArchivedStatus(b.status);
+      if (aArchived !== bArchived) return aArchived ? 1 : -1; // archived to bottom
+
+      const aHasChat = tsToMs(a.lastMessageAt) > 0;
+      const bHasChat = tsToMs(b.lastMessageAt) > 0;
+      if (aHasChat !== bHasChat) return aHasChat ? -1 : 1; // chat threads on top
+
+      if (aHasChat && bHasChat) {
+        const aLm = tsToMs(a.lastMessageAt);
+        const bLm = tsToMs(b.lastMessageAt);
+        if (aLm !== bLm) return bLm - aLm; // most recent chat first
+        // tie-breaker: earlier start first
+        return tsToMs(a.startDateTime) - tsToMs(b.startDateTime);
+      }
+
+      // no chat: upcoming soonest first
+      const aStart = tsToMs(a.startDateTime);
+      const bStart = tsToMs(b.startDateTime);
+      if (aStart !== bStart) return aStart - bStart;
+
+      return a.id.localeCompare(b.id);
+    });
+
+    return copy;
+  }, [matches]);
+
   const renderItem = ({ item }: { item: Match }) => {
     const date = toDate(item.startDateTime);
     const chip = getChip(item);
@@ -327,7 +380,7 @@ export default function MatchesScreen() {
         ? `Starts in ${formatCountdown(msUntilStart)}`
         : "In progress / started";
 
-    // ✅ unread logic: lastMessageAt > lastReadAt AND not sent by me
+    // unread: lastMessageAt > lastReadAt AND not sent by me
     const lastMsgAt = toDateOrNull(item.lastMessageAt);
     const lastReadAt = toDateOrNull(lastReadByMatchId[item.id]);
 
@@ -340,7 +393,6 @@ export default function MatchesScreen() {
     const senderLabel =
       item.lastMessageSenderId === user?.uid ? "You" : item.lastMessageSenderName ?? "Someone";
 
-    // ✅ FIXED: no hook — just compute
     const previewTime = formatPreviewTimeFromDate(lastMsgAt);
 
     return (
@@ -377,7 +429,7 @@ export default function MatchesScreen() {
           </Text>
         )}
 
-        {/* ✅ Chat preview */}
+        {/* Chat preview */}
         {previewText ? (
           <View style={styles.chatRow}>
             <Text style={styles.chatPreview} numberOfLines={1}>
@@ -435,13 +487,13 @@ export default function MatchesScreen() {
       <Button title="Create Match" onPress={() => router.push("/(app)/match/create")} />
 
       <FlatList
-        data={matches}
+        data={sortedMatches}
         keyExtractor={(item) => item.id}
         renderItem={renderItem}
         contentContainerStyle={{ paddingVertical: 12 }}
       />
 
-      {matches.length === 0 && (
+      {sortedMatches.length === 0 && (
         <Text style={{ marginTop: 16, textAlign: "center" }}>
           No matches yet. Create one!
         </Text>
