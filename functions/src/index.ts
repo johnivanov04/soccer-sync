@@ -1,9 +1,6 @@
 // functions/src/index.ts
 import * as admin from "firebase-admin";
-import {
-  onDocumentCreated,
-  onDocumentWritten,
-} from "firebase-functions/v2/firestore";
+import { onDocumentCreated, onDocumentWritten } from "firebase-functions/v2/firestore";
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -79,10 +76,7 @@ type PushMessage = {
   data?: Record<string, any>;
 };
 
-async function sendExpoPushMany(
-  messages: PushMessage[],
-  tokenToUid?: Map<string, string>
-) {
+async function sendExpoPushMany(messages: PushMessage[], tokenToUid?: Map<string, string>) {
   if (!messages || messages.length === 0) return;
 
   const batches = chunk(messages, 100);
@@ -234,143 +228,157 @@ async function promoteIfNeeded(matchId: string) {
 }
 
 /**
- * ✅ Chat notifications + ✅ Match preview fields (lastMessage*)
+ * ✅ Chat notifications + ✅ Match preview fields (lastMessage*) + ✅ Seq counters (unread message counts)
  *
- * Adds:
+ * Adds/maintains:
+ * - matches/{matchId}.lastMessageSeq
  * - matches/{matchId}.lastMessageAt
  * - matches/{matchId}.lastMessageText
  * - matches/{matchId}.lastMessageSenderId
  * - matches/{matchId}.lastMessageSenderName
  *
+ * Also writes:
+ * - matchMessages/{msgId}.seq   (server-only, used for counting)
+ *
  * Keeps your push fixes (exclude sender by UID + TOKEN, global token de-dupe).
  */
-export const onMatchMessageCreate = onDocumentCreated(
-  "matchMessages/{msgId}",
-  async (event) => {
-    const snap = event.data;
-    if (!snap) return;
+export const onMatchMessageCreate = onDocumentCreated("matchMessages/{msgId}", async (event) => {
+  const snap = event.data;
+  if (!snap) return;
 
-    const msgId = snap.id;
-    const data = snap.data() as any;
+  const msgId = snap.id;
+  const data = snap.data() as any;
 
-    const matchId = String(data?.matchId ?? "");
-    const senderId = String(data?.userId ?? "");
-    const senderName = String(data?.displayName ?? "Someone");
-    const text = String(data?.text ?? "");
+  const matchId = String(data?.matchId ?? "");
+  const senderId = String(data?.userId ?? "");
+  const senderName = String(data?.displayName ?? "Someone");
+  const text = String(data?.text ?? "");
 
-    if (!matchId || !senderId || !text.trim()) return;
+  if (!matchId || !senderId || !text.trim()) return;
 
-    const msgRef = db.collection("matchMessages").doc(msgId);
-    const matchRef = db.collection("matches").doc(matchId);
+  const msgRef = db.collection("matchMessages").doc(msgId);
+  const matchRef = db.collection("matches").doc(matchId);
 
-    // Ensure match exists (avoid creating accidental match doc via merge)
-    const matchSnap = await matchRef.get();
-    if (!matchSnap.exists) return;
+  const createdAt = data?.createdAt ?? FieldValue.serverTimestamp();
+  const previewText220 = truncate(text.trim(), 220);
 
-    // ✅ Always update match preview fields (even if push is skipped later)
-    const createdAt = data?.createdAt ?? FieldValue.serverTimestamp();
-    await matchRef.set(
-      {
-        lastMessageAt: createdAt,
-        lastMessageText: truncate(text.trim(), 220),
-        lastMessageSenderId: senderId,
-        lastMessageSenderName: senderName,
-        updatedAt: FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
-
-    // ---- Claim idempotently to avoid double-sends ----
-    const claimed = await db.runTransaction(async (tx) => {
-      const fresh = await tx.get(msgRef);
-      const d = (fresh.data() as any) ?? {};
-      if (d?.notifiedAt || d?.notifyClaimedAt) return false;
-
-      tx.set(
-        msgRef,
-        { notifyClaimedAt: FieldValue.serverTimestamp() },
-        { merge: true }
-      );
-      return true;
-    });
-
-    if (!claimed) return;
+  // ✅ One transaction:
+  // - assigns msg.seq exactly once
+  // - increments matches.lastMessageSeq exactly once
+  // - updates match preview fields ONLY if this message is the newest seq
+  // - claims notification idempotently
+  const txRes = await db.runTransaction(async (tx) => {
+    const [msgSnap, matchSnap] = await Promise.all([tx.get(msgRef), tx.get(matchRef)]);
+    if (!matchSnap.exists) return { ok: false as const, claimed: false, seq: 0 };
 
     const match = matchSnap.data() as any;
-    const hostId = match?.createdBy ? String(match.createdBy) : null;
+    const currentLastSeq = Number(match?.lastMessageSeq ?? 0);
 
-    const rsvpSnap = await db
-      .collection("rsvps")
-      .where("matchId", "==", matchId)
-      .get();
+    const msg = msgSnap.exists ? ((msgSnap.data() as any) ?? {}) : {};
+    let seq = typeof msg?.seq === "number" ? msg.seq : null;
 
-    const recipientIds: string[] = [];
-    for (const d of rsvpSnap.docs) {
-      const r = d.data() as any;
-      const uid = r?.userId ? String(r.userId) : "";
-      const st = String(r?.status ?? "").toLowerCase();
-      if (!uid) continue;
-      if (st === "yes" || st === "maybe") recipientIds.push(uid);
-    }
-    if (hostId) recipientIds.push(hostId);
-
-    const finalRecipientIds = uniqStrings(recipientIds).filter(
-      (uid) => uid !== senderId
-    );
-
-    // ---- Token-level exclusion + global de-dupe ----
-    const senderTokens = await getUserTokens(senderId);
-    const senderTokenSet = new Set(senderTokens);
-
-    const pushes: PushMessage[] = [];
-    const sentTokens = new Set<string>();
-    const tokenToUid = new Map<string, string>();
-
-    const body = truncate(text.trim(), 180);
-    const title = "Match Chat";
-
-    for (const uid of finalRecipientIds) {
-      const tokens = await getUserTokens(uid);
-
-      for (const t of tokens) {
-        if (senderTokenSet.has(t)) continue;
-        if (sentTokens.has(t)) continue;
-
-        sentTokens.add(t);
-        tokenToUid.set(t, uid);
-
-        pushes.push({
-          to: t,
-          title,
-          body: `${senderName}: ${body}`,
-          sound: "default",
-          data: { matchId, type: "chat" },
-        });
-      }
+    // assign seq once
+    if (seq == null || !Number.isFinite(seq)) {
+      seq = currentLastSeq + 1;
+      tx.set(msgRef, { seq }, { merge: true });
+      tx.set(matchRef, { lastMessageSeq: seq }, { merge: true });
     }
 
-    if (pushes.length === 0) {
-      await msgRef.set(
+    // only the newest seq should overwrite preview fields
+    if (currentLastSeq <= seq) {
+      tx.set(
+        matchRef,
         {
-          notifiedAt: FieldValue.serverTimestamp(),
-          notifyTokenCount: 0,
+          lastMessageSeq: Math.max(currentLastSeq, seq),
+          lastMessageAt: createdAt,
+          lastMessageText: previewText220,
+          lastMessageSenderId: senderId,
+          lastMessageSenderName: senderName,
+          updatedAt: FieldValue.serverTimestamp(),
         },
         { merge: true }
       );
-      return;
     }
 
-    await sendExpoPushMany(pushes, tokenToUid);
+    // idempotent notify-claim (prevents double push sends on retries)
+    if (msg?.notifiedAt || msg?.notifyClaimedAt) {
+      return { ok: true as const, claimed: false, seq };
+    }
 
+    tx.set(msgRef, { notifyClaimedAt: FieldValue.serverTimestamp() }, { merge: true });
+    return { ok: true as const, claimed: true, seq };
+  });
+
+  if (!txRes.ok) return;
+  if (!txRes.claimed) return;
+
+  // ---- Recipients ----
+  const matchSnap = await matchRef.get();
+  if (!matchSnap.exists) return;
+
+  const match = matchSnap.data() as any;
+  const hostId = match?.createdBy ? String(match.createdBy) : null;
+
+  const rsvpSnap = await db.collection("rsvps").where("matchId", "==", matchId).get();
+
+  const recipientIds: string[] = [];
+  for (const d of rsvpSnap.docs) {
+    const r = d.data() as any;
+    const uid = r?.userId ? String(r.userId) : "";
+    const st = String(r?.status ?? "").toLowerCase();
+    if (!uid) continue;
+    if (st === "yes" || st === "maybe") recipientIds.push(uid);
+  }
+  if (hostId) recipientIds.push(hostId);
+
+  const finalRecipientIds = uniqStrings(recipientIds).filter((uid) => uid !== senderId);
+
+  // ---- Token-level exclusion + global de-dupe ----
+  const senderTokens = await getUserTokens(senderId);
+  const senderTokenSet = new Set(senderTokens);
+
+  const pushes: PushMessage[] = [];
+  const sentTokens = new Set<string>();
+  const tokenToUid = new Map<string, string>();
+
+  const body = truncate(text.trim(), 180);
+  const title = "Match Chat";
+
+  for (const uid of finalRecipientIds) {
+    const tokens = await getUserTokens(uid);
+
+    for (const t of tokens) {
+      if (senderTokenSet.has(t)) continue;
+      if (sentTokens.has(t)) continue;
+
+      sentTokens.add(t);
+      tokenToUid.set(t, uid);
+
+      pushes.push({
+        to: t,
+        title,
+        body: `${senderName}: ${body}`,
+        sound: "default",
+        data: { matchId, type: "chat" },
+      });
+    }
+  }
+
+  if (pushes.length === 0) {
     await msgRef.set(
-      {
-        notifiedAt: FieldValue.serverTimestamp(),
-        notifyTokenCount: pushes.length,
-      },
+      { notifiedAt: FieldValue.serverTimestamp(), notifyTokenCount: 0 },
       { merge: true }
     );
+    return;
   }
-);
+
+  await sendExpoPushMany(pushes, tokenToUid);
+
+  await msgRef.set(
+    { notifiedAt: FieldValue.serverTimestamp(), notifyTokenCount: pushes.length },
+    { merge: true }
+  );
+});
 
 /**
  * Trigger on ANY RSVP create/update/delete:

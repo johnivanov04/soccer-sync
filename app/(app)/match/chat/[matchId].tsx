@@ -110,6 +110,10 @@ export default function MatchChatScreen() {
 
   const [loading, setLoading] = useState(true);
   const [matchTeamId, setMatchTeamId] = useState<string | null>(null);
+
+  // ✅ NEW: match-level sequence for unread counts
+  const [matchLastSeq, setMatchLastSeq] = useState<number>(0);
+
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -133,11 +137,11 @@ export default function MatchChatScreen() {
     try {
       const ref = doc(db, "users", user.uid, "chatReads", matchIdStr);
 
-      // Only write allowed fields (rules below)
       await setDoc(
         ref,
         {
           lastReadAt: serverTimestamp(),
+          lastReadSeq: matchLastSeq ?? 0,
           updatedAt: serverTimestamp(),
         },
         { merge: true }
@@ -145,7 +149,7 @@ export default function MatchChatScreen() {
     } catch (e) {
       console.warn("markChatReadNow failed:", e);
     }
-  }, [user?.uid, matchIdStr]);
+  }, [user?.uid, matchIdStr, matchLastSeq]);
 
   const scheduleMarkChatRead = useCallback(() => {
     if (!user?.uid || !matchIdStr) return;
@@ -170,45 +174,43 @@ export default function MatchChatScreen() {
     return () => sub.remove();
   }, [scheduleMarkChatRead]);
 
-  // Load teamId from match doc (needed for writing + rules)
+  // ✅ Live subscribe to match doc (teamId + lastMessageSeq)
   useEffect(() => {
-    let alive = true;
+    if (!matchIdStr) {
+      setLoading(false);
+      setMatchTeamId(null);
+      setMatchLastSeq(0);
+      return;
+    }
 
-    async function loadMatchTeam() {
-      if (!matchIdStr) {
-        setLoading(false);
-        setMatchTeamId(null);
-        return;
-      }
-
-      try {
-        const matchRef = doc(db, "matches", matchIdStr);
-        const snap = await getDoc(matchRef);
-
-        if (!alive) return;
-
+    const matchRef = doc(db, "matches", matchIdStr);
+    const unsub = onSnapshot(
+      matchRef,
+      (snap) => {
         if (!snap.exists()) {
           setMatchTeamId(null);
+          setMatchLastSeq(0);
           setLoading(false);
           return;
         }
 
         const data = snap.data() as any;
         const tid = data?.teamId ? String(data.teamId) : null;
+        const seq = typeof data?.lastMessageSeq === "number" ? data.lastMessageSeq : 0;
+
         setMatchTeamId(tid);
+        setMatchLastSeq(seq);
         setLoading(false);
-      } catch (e) {
-        console.error("Error loading match for chat:", e);
-        if (!alive) return;
+      },
+      (err) => {
+        console.error("Error listening to match for chat:", err);
         setMatchTeamId(null);
+        setMatchLastSeq(0);
         setLoading(false);
       }
-    }
+    );
 
-    loadMatchTeam();
-    return () => {
-      alive = false;
-    };
+    return () => unsub();
   }, [matchIdStr]);
 
   // Live subscribe to messages (query DESC for index, but we sort stably in state)
@@ -285,11 +287,11 @@ export default function MatchChatScreen() {
     });
   }, [messages.length]);
 
-  // ✅ Mark read when opening chat + when latest message changes
+  // ✅ Mark read when opening chat + when latest message changes + when match seq changes
   const lastMsgId = messages[messages.length - 1]?.id ?? null;
   useEffect(() => {
     scheduleMarkChatRead();
-  }, [scheduleMarkChatRead, lastMsgId]);
+  }, [scheduleMarkChatRead, lastMsgId, matchLastSeq]);
 
   const canSend = useMemo(() => {
     return (
@@ -513,9 +515,7 @@ export default function MatchChatScreen() {
                   )}
 
                   <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleOther]}>
-                    {!mine && showMeta && (
-                      <Text style={styles.bubbleName}>{item.displayName}</Text>
-                    )}
+                    {!mine && showMeta && <Text style={styles.bubbleName}>{item.displayName}</Text>}
 
                     <Text style={styles.bubbleText}>{item.text}</Text>
 

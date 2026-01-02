@@ -10,6 +10,14 @@ type MatchMini = {
   teamId?: string;
   lastMessageAt?: any;
   lastMessageSenderId?: string;
+
+  // ✅ new: maintained by Cloud Function
+  lastMessageSeq?: number;
+};
+
+type ChatReadMini = {
+  lastReadAt?: any;
+  lastReadSeq?: number | null;
 };
 
 function toDateOrNull(raw: any): Date | null {
@@ -24,7 +32,7 @@ export default function AppTabsLayout() {
 
   const [teamId, setTeamId] = useState<string | null>(null);
   const [matches, setMatches] = useState<MatchMini[]>([]);
-  const [lastReadByMatchId, setLastReadByMatchId] = useState<Record<string, any>>({});
+  const [readByMatchId, setReadByMatchId] = useState<Record<string, ChatReadMini>>({});
 
   // teamId
   useEffect(() => {
@@ -65,6 +73,7 @@ export default function AppTabsLayout() {
           teamId: data.teamId,
           lastMessageAt: data.lastMessageAt,
           lastMessageSenderId: data.lastMessageSenderId,
+          lastMessageSeq: typeof data.lastMessageSeq === "number" ? data.lastMessageSeq : undefined,
         };
       });
       setMatches(list);
@@ -76,18 +85,21 @@ export default function AppTabsLayout() {
   // chatReads
   useEffect(() => {
     if (!user?.uid) {
-      setLastReadByMatchId({});
+      setReadByMatchId({});
       return;
     }
 
     const readsCol = collection(db, "users", user.uid, "chatReads");
     const unsub = onSnapshot(readsCol, (snap) => {
-      const map: Record<string, any> = {};
+      const map: Record<string, ChatReadMini> = {};
       snap.docs.forEach((d) => {
         const data = d.data() as any;
-        map[d.id] = data?.lastReadAt ?? null;
+        map[d.id] = {
+          lastReadAt: data?.lastReadAt ?? null,
+          lastReadSeq: typeof data?.lastReadSeq === "number" ? data.lastReadSeq : null,
+        };
       });
-      setLastReadByMatchId(map);
+      setReadByMatchId(map);
     });
 
     return () => unsub();
@@ -97,19 +109,34 @@ export default function AppTabsLayout() {
     if (!user?.uid) return 0;
 
     let n = 0;
+
     for (const m of matches) {
+      // no messages
+      const lastSeq = typeof m.lastMessageSeq === "number" ? m.lastMessageSeq : null;
+      const read = readByMatchId[m.id];
+      const readSeq = typeof read?.lastReadSeq === "number" ? read.lastReadSeq : null;
+
+      // don't count if YOUR latest message is the latest thing in the thread
+      if (m.lastMessageSenderId === user.uid) continue;
+
+      // ✅ Preferred: exact unread message count via seq
+      if (lastSeq != null && lastSeq > 0 && readSeq != null) {
+        const delta = Math.max(0, lastSeq - readSeq);
+        if (delta > 0) n += delta;
+        continue;
+      }
+
+      // ✅ Fallback (legacy threads without seq): behave like before (counts 1 per unread thread)
       const lastMsgAt = toDateOrNull(m.lastMessageAt);
       if (!lastMsgAt) continue;
 
-      // don't count your own last message as unread
-      if (m.lastMessageSenderId === user.uid) continue;
-
-      const lastReadAt = toDateOrNull(lastReadByMatchId[m.id]);
+      const lastReadAt = toDateOrNull(read?.lastReadAt);
       const unread = !lastReadAt || lastReadAt.getTime() < lastMsgAt.getTime();
-      if (unread) n++;
+      if (unread) n += 1;
     }
+
     return n;
-  }, [matches, lastReadByMatchId, user?.uid]);
+  }, [matches, readByMatchId, user?.uid]);
 
   const badge = unreadCount > 0 ? (unreadCount > 99 ? "99+" : unreadCount) : undefined;
 
@@ -123,38 +150,10 @@ export default function AppTabsLayout() {
           tabBarBadge: badge,
         }}
       />
-
-      <Tabs.Screen
-        name="teams"
-        options={{
-          title: "Teams",
-          tabBarLabel: "Teams",
-        }}
-      />
-
-      <Tabs.Screen
-        name="stats"
-        options={{
-          title: "Fitness",
-          tabBarLabel: "Fitness",
-        }}
-      />
-
-      <Tabs.Screen
-        name="myRsvps"
-        options={{
-          title: "My RSVPs",
-          tabBarLabel: "My RSVPs",
-        }}
-      />
-
-      <Tabs.Screen
-        name="profile"
-        options={{
-          title: "Profile",
-          tabBarLabel: "Profile",
-        }}
-      />
+      <Tabs.Screen name="teams" options={{ title: "Teams", tabBarLabel: "Teams" }} />
+      <Tabs.Screen name="stats" options={{ title: "Fitness", tabBarLabel: "Fitness" }} />
+      <Tabs.Screen name="myRsvps" options={{ title: "My RSVPs", tabBarLabel: "My RSVPs" }} />
+      <Tabs.Screen name="profile" options={{ title: "Profile", tabBarLabel: "Profile" }} />
     </Tabs>
   );
 }

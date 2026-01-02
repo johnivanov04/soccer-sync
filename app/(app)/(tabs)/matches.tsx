@@ -30,12 +30,20 @@ type Match = {
   lastMessageText?: string;
   lastMessageSenderId?: string;
   lastMessageSenderName?: string;
+
+  // ✅ new: written by Cloud Function
+  lastMessageSeq?: number;
 };
 
 type MyRsvpMini = {
   matchId: string;
   status?: RsvpStatus;
   isWaitlisted?: boolean;
+};
+
+type ChatReadMini = {
+  lastReadAt?: any;
+  lastReadSeq?: number | null;
 };
 
 function toDate(raw: any): Date {
@@ -164,8 +172,8 @@ export default function MatchesScreen() {
   const [matches, setMatches] = useState<Match[]>([]);
   const [myRsvpByMatchId, setMyRsvpByMatchId] = useState<Record<string, MyRsvpMini>>({});
 
-  // per-match lastReadAt
-  const [lastReadByMatchId, setLastReadByMatchId] = useState<Record<string, any>>({});
+  // per-match read state
+  const [lastReadByMatchId, setLastReadByMatchId] = useState<Record<string, ChatReadMini>>({});
 
   // 1) Subscribe to current user's teamId
   useEffect(() => {
@@ -305,10 +313,13 @@ export default function MatchesScreen() {
     const unsub = onSnapshot(
       readsCol,
       (snap) => {
-        const map: Record<string, any> = {};
+        const map: Record<string, ChatReadMini> = {};
         snap.docs.forEach((d) => {
           const data = d.data() as any;
-          map[d.id] = data?.lastReadAt ?? null;
+          map[d.id] = {
+            lastReadAt: data?.lastReadAt ?? null,
+            lastReadSeq: typeof data?.lastReadSeq === "number" ? data.lastReadSeq : null,
+          };
         });
         setLastReadByMatchId(map);
       },
@@ -380,14 +391,28 @@ export default function MatchesScreen() {
         ? `Starts in ${formatCountdown(msUntilStart)}`
         : "In progress / started";
 
-    // unread: lastMessageAt > lastReadAt AND not sent by me
-    const lastMsgAt = toDateOrNull(item.lastMessageAt);
-    const lastReadAt = toDateOrNull(lastReadByMatchId[item.id]);
+    // ✅ Unread MESSAGE COUNT (seq-based when available)
+    const read = lastReadByMatchId[item.id];
+    const lastSeq = typeof item.lastMessageSeq === "number" ? item.lastMessageSeq : null;
+    const readSeq = typeof read?.lastReadSeq === "number" ? read.lastReadSeq : null;
 
-    const unread =
-      !!lastMsgAt &&
-      item.lastMessageSenderId !== user?.uid &&
-      (!lastReadAt || lastReadAt.getTime() < lastMsgAt.getTime());
+    const lastMsgAt = toDateOrNull(item.lastMessageAt);
+    const lastReadAt = toDateOrNull(read?.lastReadAt);
+
+    let unreadCount = 0;
+
+    if (item.lastMessageSenderId !== user?.uid) {
+      if (lastSeq != null && lastSeq > 0) {
+        // treat missing readSeq as 0 (never opened => all messages unread)
+        unreadCount = Math.max(0, lastSeq - (readSeq ?? 0));
+      } else if (!!lastMsgAt) {
+        // legacy fallback
+        const unreadLegacy = !lastReadAt || lastReadAt.getTime() < lastMsgAt.getTime();
+        unreadCount = unreadLegacy ? 1 : 0;
+      }
+    }
+
+    const unread = unreadCount > 0;
 
     const previewText = (item.lastMessageText ?? "").trim();
     const senderLabel =
@@ -413,6 +438,13 @@ export default function MatchesScreen() {
 
           <View style={styles.topRight}>
             {unread && <View style={styles.unreadDot} />}
+
+            {unreadCount > 0 && (
+              <View style={styles.unreadPill}>
+                <Text style={styles.unreadPillText}>{unreadCount > 99 ? "99+" : unreadCount}</Text>
+              </View>
+            )}
+
             <View style={[styles.chip, (styles as any)[`chip_${chip.variant}`]]}>
               <Text style={styles.chipText}>{chip.label}</Text>
             </View>
@@ -494,9 +526,7 @@ export default function MatchesScreen() {
       />
 
       {sortedMatches.length === 0 && (
-        <Text style={{ marginTop: 16, textAlign: "center" }}>
-          No matches yet. Create one!
-        </Text>
+        <Text style={{ marginTop: 16, textAlign: "center" }}>No matches yet. Create one!</Text>
       )}
     </View>
   );
@@ -546,6 +576,18 @@ const styles = StyleSheet.create({
     height: 10,
     borderRadius: 999,
     backgroundColor: "#2b4cff",
+  },
+
+  unreadPill: {
+    paddingVertical: 2,
+    paddingHorizontal: 8,
+    borderRadius: 999,
+    backgroundColor: "#2b4cff",
+  },
+  unreadPillText: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "800",
   },
 
   title: { fontWeight: "bold", flex: 1 },
