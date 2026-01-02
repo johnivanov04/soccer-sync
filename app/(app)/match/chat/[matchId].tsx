@@ -11,11 +11,13 @@ import {
   orderBy,
   query,
   serverTimestamp,
+  setDoc,
   where,
 } from "firebase/firestore";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
+  AppState,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -118,8 +120,55 @@ export default function MatchChatScreen() {
   // ✅ Freeze a stable timestamp per msgId so order/clustering never flips
   const stableMsByIdRef = useRef<Map<string, number>>(new Map());
 
-  // If you ever decide you want meta on the LAST message instead, set this to false.
+  // If you ever decide you want meta on the FIRST message instead, set this to true.
   const META_ON_FIRST_MESSAGE_IN_CLUSTER = false;
+
+  // -------------------------------
+  // ✅ Mark-as-read plumbing
+  // -------------------------------
+  const markReadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const markChatReadNow = useCallback(async () => {
+    if (!user?.uid || !matchIdStr) return;
+    try {
+      const ref = doc(db, "users", user.uid, "chatReads", matchIdStr);
+
+      // Only write allowed fields (rules below)
+      await setDoc(
+        ref,
+        {
+          lastReadAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    } catch (e) {
+      console.warn("markChatReadNow failed:", e);
+    }
+  }, [user?.uid, matchIdStr]);
+
+  const scheduleMarkChatRead = useCallback(() => {
+    if (!user?.uid || !matchIdStr) return;
+
+    if (markReadTimerRef.current) clearTimeout(markReadTimerRef.current);
+    markReadTimerRef.current = setTimeout(() => {
+      markChatReadNow();
+    }, 350);
+  }, [user?.uid, matchIdStr, markChatReadNow]);
+
+  useEffect(() => {
+    return () => {
+      if (markReadTimerRef.current) clearTimeout(markReadTimerRef.current);
+    };
+  }, []);
+
+  // Mark read when app returns to foreground
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state === "active") scheduleMarkChatRead();
+    });
+    return () => sub.remove();
+  }, [scheduleMarkChatRead]);
 
   // Load teamId from match doc (needed for writing + rules)
   useEffect(() => {
@@ -178,7 +227,6 @@ export default function MatchChatScreen() {
       q,
       (snap) => {
         const stableMap = stableMsByIdRef.current;
-
         const nextIds = new Set<string>();
 
         const list: ChatMessage[] = snap.docs.map((d) => {
@@ -237,6 +285,12 @@ export default function MatchChatScreen() {
     });
   }, [messages.length]);
 
+  // ✅ Mark read when opening chat + when latest message changes
+  const lastMsgId = messages[messages.length - 1]?.id ?? null;
+  useEffect(() => {
+    scheduleMarkChatRead();
+  }, [scheduleMarkChatRead, lastMsgId]);
+
   const canSend = useMemo(() => {
     return (
       !!user?.uid &&
@@ -294,6 +348,9 @@ export default function MatchChatScreen() {
       requestAnimationFrame(() => {
         listRef.current?.scrollToEnd({ animated: true });
       });
+
+      // ✅ after sending, you are definitely “caught up”
+      scheduleMarkChatRead();
     } catch (e) {
       console.error("Send message error:", e);
       Alert.alert("Error", "Could not send message.");
