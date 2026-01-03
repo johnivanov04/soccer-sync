@@ -1,4 +1,3 @@
-// functions/src/index.ts
 import * as admin from "firebase-admin";
 import { onDocumentCreated, onDocumentWritten } from "firebase-functions/v2/firestore";
 
@@ -39,10 +38,41 @@ async function getUserTokens(uid: string): Promise<string[]> {
   ]);
 }
 
+// ✅ Robust: derive UID from snapshot ref (no reliance on getAll ordering)
+function uidFromChatPrefSnap(s: FirebaseFirestore.DocumentSnapshot): string | null {
+  // path: users/{uid}/chatPrefs/{matchId}
+  const userDoc = s.ref.parent?.parent; // users/{uid}
+  return userDoc?.id ? String(userDoc.id) : null;
+}
+
+// ✅ Per-match mute lookup (robust)
+async function getMutedUidsForMatch(uids: string[], matchId: string): Promise<Set<string>> {
+  const list = uniqStrings(uids);
+  if (!matchId || list.length === 0) return new Set();
+
+  const refs = list.map((uid) =>
+    db.collection("users").doc(uid).collection("chatPrefs").doc(matchId)
+  );
+
+  const snaps = await (db as any).getAll(...refs);
+
+  const muted = new Set<string>();
+  for (const s of snaps as FirebaseFirestore.DocumentSnapshot[]) {
+    if (!s?.exists) continue;
+    const d = s.data() as any;
+    if (d?.muted === true) {
+      const uid = uidFromChatPrefSnap(s);
+      if (uid) muted.add(uid);
+    }
+  }
+  return muted;
+}
+
 async function removeBadTokenFromUser(uid: string, token: string) {
   if (!uid || !token) return;
   try {
     const userRef = db.collection("users").doc(uid);
+
     await userRef.set(
       {
         expoPushTokens: FieldValue.arrayRemove(token),
@@ -52,6 +82,7 @@ async function removeBadTokenFromUser(uid: string, token: string) {
       { merge: true }
     );
 
+    // Safety: if legacy single token still equals this token, delete it.
     const fresh = await userRef.get();
     const d = fresh.data() as any;
     if (d?.expoPushToken === token) {
@@ -228,19 +259,7 @@ async function promoteIfNeeded(matchId: string) {
 }
 
 /**
- * ✅ Chat notifications + ✅ Match preview fields (lastMessage*) + ✅ Seq counters (unread message counts)
- *
- * Adds/maintains:
- * - matches/{matchId}.lastMessageSeq
- * - matches/{matchId}.lastMessageAt
- * - matches/{matchId}.lastMessageText
- * - matches/{matchId}.lastMessageSenderId
- * - matches/{matchId}.lastMessageSenderName
- *
- * Also writes:
- * - matchMessages/{msgId}.seq   (server-only, used for counting)
- *
- * Keeps your push fixes (exclude sender by UID + TOKEN, global token de-dupe).
+ * ✅ Chat notifications + ✅ Match preview fields (lastMessage*) + ✅ Seq counters
  */
 export const onMatchMessageCreate = onDocumentCreated("matchMessages/{msgId}", async (event) => {
   const snap = event.data;
@@ -262,11 +281,7 @@ export const onMatchMessageCreate = onDocumentCreated("matchMessages/{msgId}", a
   const createdAt = data?.createdAt ?? FieldValue.serverTimestamp();
   const previewText220 = truncate(text.trim(), 220);
 
-  // ✅ One transaction:
-  // - assigns msg.seq exactly once
-  // - increments matches.lastMessageSeq exactly once
-  // - updates match preview fields ONLY if this message is the newest seq
-  // - claims notification idempotently
+  // --- claim notifications + update match preview + seq ---
   const txRes = await db.runTransaction(async (tx) => {
     const [msgSnap, matchSnap] = await Promise.all([tx.get(msgRef), tx.get(matchRef)]);
     if (!matchSnap.exists) return { ok: false as const, claimed: false, seq: 0 };
@@ -277,14 +292,12 @@ export const onMatchMessageCreate = onDocumentCreated("matchMessages/{msgId}", a
     const msg = msgSnap.exists ? ((msgSnap.data() as any) ?? {}) : {};
     let seq = typeof msg?.seq === "number" ? msg.seq : null;
 
-    // assign seq once
     if (seq == null || !Number.isFinite(seq)) {
       seq = currentLastSeq + 1;
       tx.set(msgRef, { seq }, { merge: true });
       tx.set(matchRef, { lastMessageSeq: seq }, { merge: true });
     }
 
-    // only the newest seq should overwrite preview fields
     if (currentLastSeq <= seq) {
       tx.set(
         matchRef,
@@ -300,7 +313,6 @@ export const onMatchMessageCreate = onDocumentCreated("matchMessages/{msgId}", a
       );
     }
 
-    // idempotent notify-claim (prevents double push sends on retries)
     if (msg?.notifiedAt || msg?.notifyClaimedAt) {
       return { ok: true as const, claimed: false, seq };
     }
@@ -312,7 +324,7 @@ export const onMatchMessageCreate = onDocumentCreated("matchMessages/{msgId}", a
   if (!txRes.ok) return;
   if (!txRes.claimed) return;
 
-  // ---- Recipients ----
+  // ---- Recipients (yes/maybe + host) ----
   const matchSnap = await matchRef.get();
   if (!matchSnap.exists) return;
 
@@ -333,7 +345,44 @@ export const onMatchMessageCreate = onDocumentCreated("matchMessages/{msgId}", a
 
   const finalRecipientIds = uniqStrings(recipientIds).filter((uid) => uid !== senderId);
 
-  // ---- Token-level exclusion + global de-dupe ----
+  // ✅ mute set (by UID)
+  let mutedSet = new Set<string>();
+  try {
+    mutedSet = await getMutedUidsForMatch(finalRecipientIds, matchId);
+  } catch (e) {
+    console.warn("getMutedUidsForMatch failed:", e);
+    mutedSet = new Set<string>();
+  }
+
+  const recipientsAfterMute = finalRecipientIds.filter((uid) => !mutedSet.has(uid));
+
+  // ✅ IMPORTANT FIX:
+  // Token-level mute suppression in case the same Expo Go token is stored under multiple users.
+  // If ANY owner UID of a token is muted for this match, we skip that token entirely.
+  const tokensByUid = new Map<string, string[]>();
+  const tokenOwners = new Map<string, Set<string>>();
+
+  for (const uid of finalRecipientIds) {
+    const tokens = await getUserTokens(uid);
+    tokensByUid.set(uid, tokens);
+
+    for (const t of tokens) {
+      if (!tokenOwners.has(t)) tokenOwners.set(t, new Set<string>());
+      tokenOwners.get(t)!.add(uid);
+    }
+  }
+
+  const mutedTokens = new Set<string>();
+  for (const [t, owners] of tokenOwners.entries()) {
+    for (const ownerUid of owners) {
+      if (mutedSet.has(ownerUid)) {
+        mutedTokens.add(t);
+        break;
+      }
+    }
+  }
+
+  // ---- Token-level exclusion + de-dupe ----
   const senderTokens = await getUserTokens(senderId);
   const senderTokenSet = new Set(senderTokens);
 
@@ -344,11 +393,20 @@ export const onMatchMessageCreate = onDocumentCreated("matchMessages/{msgId}", a
   const body = truncate(text.trim(), 180);
   const title = "Match Chat";
 
-  for (const uid of finalRecipientIds) {
-    const tokens = await getUserTokens(uid);
+  let mutedTokenSkipHits = 0;
+
+  for (const uid of recipientsAfterMute) {
+    const tokens = tokensByUid.get(uid) ?? [];
 
     for (const t of tokens) {
       if (senderTokenSet.has(t)) continue;
+
+      // ✅ Skip tokens that belong to ANY muted UID (prevents cross-account token leakage)
+      if (mutedTokens.has(t)) {
+        mutedTokenSkipHits++;
+        continue;
+      }
+
       if (sentTokens.has(t)) continue;
 
       sentTokens.add(t);
@@ -363,6 +421,18 @@ export const onMatchMessageCreate = onDocumentCreated("matchMessages/{msgId}", a
       });
     }
   }
+
+  // write debug counters so you can verify what happened per message
+  await msgRef.set(
+    {
+      notifyRecipientCountBeforeMute: finalRecipientIds.length,
+      notifyRecipientCountAfterMute: recipientsAfterMute.length,
+      notifyMutedSkippedCount: mutedSet.size,
+      notifyMutedTokenCount: mutedTokens.size,
+      notifyMutedTokenSkipHits: mutedTokenSkipHits,
+    },
+    { merge: true }
+  );
 
   if (pushes.length === 0) {
     await msgRef.set(

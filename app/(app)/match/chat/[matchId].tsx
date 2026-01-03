@@ -112,12 +112,16 @@ export default function MatchChatScreen() {
   const [loading, setLoading] = useState(true);
   const [matchTeamId, setMatchTeamId] = useState<string | null>(null);
 
-  // ✅ NEW: keep latest seq from matches/{matchId}
+  // ✅ latest seq from matches/{matchId}
   const [lastMessageSeq, setLastMessageSeq] = useState<number>(0);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
+
+  // ✅ per-match mute state (stored at users/{uid}/chatPrefs/{matchId})
+  const [muted, setMuted] = useState(false);
+  const [togglingMute, setTogglingMute] = useState(false);
 
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const didInitialScroll = useRef(false);
@@ -139,12 +143,16 @@ export default function MatchChatScreen() {
     try {
       const ref = doc(db, "users", user.uid, "chatReads", matchIdStr);
 
-      // ✅ IMPORTANT: write lastReadSeq so your matches.tsx unreadCount becomes 0
-      await setDoc(ref, {
-        lastReadAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-        lastReadSeq: Number.isFinite(lastMessageSeq) ? lastMessageSeq : 0,
-      });
+      // ✅ merge:true so we don't wipe other fields (and future-proof)
+      await setDoc(
+        ref,
+        {
+          lastReadAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+          lastReadSeq: Number.isFinite(lastMessageSeq) ? lastMessageSeq : 0,
+        },
+        { merge: true }
+      );
     } catch (e) {
       console.warn("markChatReadNow failed:", e);
     }
@@ -165,7 +173,7 @@ export default function MatchChatScreen() {
     };
   }, []);
 
-  // ✅ When screen is opened/focused, mark read
+  // When screen is opened/focused, mark read
   useFocusEffect(
     useCallback(() => {
       scheduleMarkChatRead();
@@ -220,11 +228,66 @@ export default function MatchChatScreen() {
     return () => unsub();
   }, [matchIdStr]);
 
-  // ✅ When seq updates while you're in the chat (new message), mark read again
+  // When seq updates while you're in the chat (new message), mark read again
   useEffect(() => {
     if (!matchIdStr) return;
     scheduleMarkChatRead();
   }, [lastMessageSeq, matchIdStr, scheduleMarkChatRead]);
+
+  // ✅ Subscribe to my mute pref doc
+  useEffect(() => {
+    if (!user?.uid || !matchIdStr) {
+      setMuted(false);
+      return;
+    }
+
+    const prefRef = doc(db, "users", user.uid, "chatPrefs", matchIdStr);
+    const unsub = onSnapshot(
+      prefRef,
+      (snap) => {
+        const d = snap.data() as any;
+        setMuted(d?.muted === true);
+      },
+      () => setMuted(false)
+    );
+
+    return () => unsub();
+  }, [user?.uid, matchIdStr]);
+
+  const toggleMute = useCallback(async () => {
+    if (!user?.uid || !matchIdStr) return;
+
+    try {
+      setTogglingMute(true);
+
+      const prefRef = doc(db, "users", user.uid, "chatPrefs", matchIdStr);
+      const next = !muted;
+
+      await setDoc(
+        prefRef,
+        {
+          muted: next,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      Alert.alert(
+        next ? "Muted" : "Unmuted",
+        next
+          ? "You won’t get push notifications for this match chat."
+          : "You’ll get push notifications again for this match chat."
+      );
+
+      // feels right after a settings tap
+      scheduleMarkChatRead();
+    } catch (e) {
+      console.warn("toggleMute failed:", e);
+      Alert.alert("Error", "Could not update mute setting.");
+    } finally {
+      setTogglingMute(false);
+    }
+  }, [user?.uid, matchIdStr, muted, scheduleMarkChatRead]);
 
   // Subscribe to messages
   useEffect(() => {
@@ -268,6 +331,7 @@ export default function MatchChatScreen() {
           };
         });
 
+        // keep stableMap from growing without bound
         for (const k of stableMap.keys()) {
           if (!nextIds.has(k)) stableMap.delete(k);
         }
@@ -352,7 +416,6 @@ export default function MatchChatScreen() {
         listRef.current?.scrollToEnd({ animated: true });
       });
 
-      // ✅ caught up
       scheduleMarkChatRead();
     } catch (e) {
       console.error("Send message error:", e);
@@ -416,7 +479,16 @@ export default function MatchChatScreen() {
           </TouchableOpacity>
 
           <Text style={styles.headerTitle}>Match Chat</Text>
-          <View style={{ width: 60 }} />
+
+          <TouchableOpacity
+            onPress={toggleMute}
+            disabled={togglingMute}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <Text style={[styles.muteText, muted && styles.muteTextOn]}>
+              {togglingMute ? "…" : muted ? "Unmute" : "Mute"}
+            </Text>
+          </TouchableOpacity>
         </View>
 
         <FlatList
@@ -567,6 +639,9 @@ const styles = StyleSheet.create({
   backText: { fontSize: 16, color: "#007AFF", fontWeight: "600", width: 60 },
   headerTitle: { fontSize: 18, fontWeight: "700" },
 
+  muteText: { fontSize: 14, fontWeight: "800", color: "#007AFF", width: 60, textAlign: "right" },
+  muteTextOn: { color: "#d11" },
+
   messagesContainer: { padding: 16, paddingBottom: 8 },
   emptyText: { color: "#666" },
 
@@ -601,7 +676,12 @@ const styles = StyleSheet.create({
   timeText: { marginTop: 6, fontSize: 11, color: "#666", alignSelf: "flex-end" },
 
   dateSepWrap: { alignItems: "center", marginBottom: 6, marginTop: 2 },
-  dateSepPill: { paddingVertical: 4, paddingHorizontal: 10, borderRadius: 999, backgroundColor: "#eee" },
+  dateSepPill: {
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    backgroundColor: "#eee",
+  },
   dateSepText: { fontSize: 12, fontWeight: "700", color: "#666" },
 
   composer: {
