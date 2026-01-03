@@ -17,21 +17,13 @@ export function initNotifications() {
     }),
   });
 
-  // ✅ Tells us if a notification is actually delivered to the app (foreground)
+  // ✅ Helpful debug: tells us if a notification is delivered while app is foreground
   Notifications.addNotificationReceivedListener((n) => {
     console.log("🔔 RECEIVED (foreground):", {
       id: n?.request?.identifier,
       title: n?.request?.content?.title,
       body: n?.request?.content?.body,
       data: n?.request?.content?.data,
-    });
-  });
-
-  // ✅ Tells us if you tapped a notification
-  Notifications.addNotificationResponseReceivedListener((resp) => {
-    console.log("👉 TAPPED:", {
-      id: resp?.notification?.request?.identifier,
-      data: resp?.notification?.request?.content?.data,
     });
   });
 
