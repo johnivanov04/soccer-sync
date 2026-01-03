@@ -1,6 +1,13 @@
 // app/(app)/(tabs)/_layout.tsx
 import { Tabs } from "expo-router";
-import { collection, doc, onSnapshot, orderBy, query, where } from "firebase/firestore";
+import {
+  collection,
+  doc,
+  onSnapshot,
+  orderBy,
+  query,
+  where,
+} from "firebase/firestore";
 import React, { useEffect, useMemo, useState } from "react";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
@@ -11,13 +18,18 @@ type MatchMini = {
   lastMessageAt?: any;
   lastMessageSenderId?: string;
 
-  // ✅ new: maintained by Cloud Function
+  // ✅ maintained by Cloud Function
   lastMessageSeq?: number;
 };
 
 type ChatReadMini = {
   lastReadAt?: any;
   lastReadSeq?: number | null;
+};
+
+type ChatPrefMini = {
+  muted?: boolean;
+  updatedAt?: any;
 };
 
 function toDateOrNull(raw: any): Date | null {
@@ -32,7 +44,14 @@ export default function AppTabsLayout() {
 
   const [teamId, setTeamId] = useState<string | null>(null);
   const [matches, setMatches] = useState<MatchMini[]>([]);
-  const [readByMatchId, setReadByMatchId] = useState<Record<string, ChatReadMini>>({});
+  const [readByMatchId, setReadByMatchId] = useState<
+    Record<string, ChatReadMini>
+  >({});
+
+  // ✅ NEW: mute prefs keyed by matchId
+  const [prefByMatchId, setPrefByMatchId] = useState<
+    Record<string, ChatPrefMini>
+  >({});
 
   // teamId
   useEffect(() => {
@@ -63,7 +82,11 @@ export default function AppTabsLayout() {
     }
 
     const matchesCol = collection(db, "matches");
-    const q = query(matchesCol, where("teamId", "==", teamId), orderBy("startDateTime", "asc"));
+    const q = query(
+      matchesCol,
+      where("teamId", "==", teamId),
+      orderBy("startDateTime", "asc")
+    );
 
     const unsub = onSnapshot(q, (snap) => {
       const list: MatchMini[] = snap.docs.map((d) => {
@@ -73,7 +96,8 @@ export default function AppTabsLayout() {
           teamId: data.teamId,
           lastMessageAt: data.lastMessageAt,
           lastMessageSenderId: data.lastMessageSenderId,
-          lastMessageSeq: typeof data.lastMessageSeq === "number" ? data.lastMessageSeq : undefined,
+          lastMessageSeq:
+            typeof data.lastMessageSeq === "number" ? data.lastMessageSeq : undefined,
         };
       });
       setMatches(list);
@@ -105,15 +129,47 @@ export default function AppTabsLayout() {
     return () => unsub();
   }, [user?.uid]);
 
+  // ✅ NEW: chatPrefs (mute)
+  useEffect(() => {
+    if (!user?.uid) {
+      setPrefByMatchId({});
+      return;
+    }
+
+    const prefsCol = collection(db, "users", user.uid, "chatPrefs");
+    const unsub = onSnapshot(
+      prefsCol,
+      (snap) => {
+        const map: Record<string, ChatPrefMini> = {};
+        snap.docs.forEach((d) => {
+          const data = d.data() as any;
+          map[d.id] = {
+            muted: data?.muted === true,
+            updatedAt: data?.updatedAt ?? null,
+          };
+        });
+        setPrefByMatchId(map);
+      },
+      () => setPrefByMatchId({})
+    );
+
+    return () => unsub();
+  }, [user?.uid]);
+
   const unreadCount = useMemo(() => {
     if (!user?.uid) return 0;
 
     let n = 0;
 
     for (const m of matches) {
+      const matchId = m.id;
+
+      // ✅ Skip muted chats entirely
+      if (prefByMatchId?.[matchId]?.muted === true) continue;
+
       // no messages
       const lastSeq = typeof m.lastMessageSeq === "number" ? m.lastMessageSeq : null;
-      const read = readByMatchId[m.id];
+      const read = readByMatchId[matchId];
       const readSeq = typeof read?.lastReadSeq === "number" ? read.lastReadSeq : null;
 
       // don't count if YOUR latest message is the latest thing in the thread
@@ -126,7 +182,7 @@ export default function AppTabsLayout() {
         continue;
       }
 
-      // ✅ Fallback (legacy threads without seq): behave like before (counts 1 per unread thread)
+      // ✅ Fallback (legacy threads without seq): counts 1 per unread thread
       const lastMsgAt = toDateOrNull(m.lastMessageAt);
       if (!lastMsgAt) continue;
 
@@ -136,9 +192,10 @@ export default function AppTabsLayout() {
     }
 
     return n;
-  }, [matches, readByMatchId, user?.uid]);
+  }, [matches, readByMatchId, prefByMatchId, user?.uid]);
 
-  const badge = unreadCount > 0 ? (unreadCount > 99 ? "99+" : unreadCount) : undefined;
+  const badge =
+    unreadCount > 0 ? (unreadCount > 99 ? "99+" : unreadCount) : undefined;
 
   return (
     <Tabs screenOptions={{ headerTitleAlign: "center" }}>
