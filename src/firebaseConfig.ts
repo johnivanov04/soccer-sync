@@ -1,11 +1,11 @@
-// src/firebaseConfig.js
-import { initializeApp } from "firebase/app";
+// src/firebaseConfig.ts
+import { getApp, getApps, initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
+import { getFunctions } from "firebase/functions";
 import { getStorage } from "firebase/storage";
 
-// ✅ Auth persistence for React Native
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { getAuth, getReactNativePersistence, initializeAuth } from "firebase/auth";
+import { type Auth, getAuth, getReactNativePersistence, initializeAuth } from "firebase/auth";
 
 const firebaseConfig = {
   apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY,
@@ -16,18 +16,27 @@ const firebaseConfig = {
   appId: process.env.EXPO_PUBLIC_FIREBASE_APP_ID,
 };
 
-const app = initializeApp(firebaseConfig);
+// ✅ Avoid re-initializing during Fast Refresh
+const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 
-// ✅ Avoid "Auth has already been initialized" during Fast Refresh
-let auth;
+// ✅ Give auth a real TS type (fixes “implicitly has any”)
+let auth: Auth;
 try {
   auth = initializeAuth(app, {
     persistence: getReactNativePersistence(AsyncStorage),
   });
-} catch (e) {
+} catch {
+  // If initializeAuth was already called (Fast Refresh), fall back
   auth = getAuth(app);
 }
 
 export { auth };
 export const db = getFirestore(app);
 export const storage = getStorage(app);
+
+// ✅ This is what your teams.tsx needs
+export const functions = getFunctions(app);
+
+// Optional emulator wiring
+// import { connectFunctionsEmulator } from "firebase/functions";
+// if (__DEV__) connectFunctionsEmulator(functions, "localhost", 5001);

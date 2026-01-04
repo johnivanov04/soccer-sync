@@ -1,23 +1,38 @@
 // app/(app)/(tabs)/teams.tsx
-import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
-import React, { useEffect, useMemo, useState } from "react";
 import {
-  Alert,
-  Button,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from "react-native";
+  collection,
+  doc,
+  onSnapshot,
+  query,
+  where
+} from "firebase/firestore";
+import { httpsCallable } from "firebase/functions";
+import React, { useEffect, useMemo, useState } from "react";
+import { Alert, Button, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../../../src/context/AuthContext";
-import { db } from "../../../src/firebaseConfig";
+import { db, functions } from "../../../src/firebaseConfig";
 
 type Team = {
   id: string;
   name?: string;
   homeCity?: string;
   defaultMaxPlayers?: number;
+  inviteCode?: string; // ✅ new (rotatable)
+  createdBy?: string;
+};
+
+type Membership = {
+  id: string;
+  teamId: string;
+  teamName?: string;
+  userId: string;
+  userDisplayName?: string;
+  userEmail?: string;
+  role: "owner" | "admin" | "member";
+  status: "pending" | "active" | "removed" | "left";
+  createdAt?: any;
+  updatedAt?: any;
 };
 
 function normalizeCode(raw: string) {
@@ -25,15 +40,35 @@ function normalizeCode(raw: string) {
 }
 
 function isValidTeamCode(code: string) {
-  // 3–24 chars: letters, numbers, hyphen only
   return /^[a-z0-9-]{3,24}$/.test(code);
+}
+
+function isAdminRole(role?: string) {
+  return role === "owner" || role === "admin";
+}
+
+function prettyFnError(e: any) {
+  const msg = String(e?.message ?? e ?? "");
+  const code = String(e?.code ?? "");
+
+  // firebase functions errors often look like: "functions/failed-precondition"
+  if (code.includes("failed-precondition") || msg.toLowerCase().includes("failed-precondition")) {
+    return "That action isn’t allowed right now (likely already in a team / owner cannot leave).";
+  }
+  if (code.includes("permission-denied") || msg.toLowerCase().includes("permission")) {
+    return "Permission denied.";
+  }
+  if (code.includes("not-found") || msg.toLowerCase().includes("not found")) {
+    return "Not found.";
+  }
+  return msg || "Something went wrong.";
 }
 
 export default function TeamsScreen() {
   const { user } = useAuth();
 
-  const [teamId, setTeamId] = useState<string | null>(null);
-  const [team, setTeam] = useState<Team | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
 
   // Join
   const [joinCode, setJoinCode] = useState("");
@@ -42,136 +77,187 @@ export default function TeamsScreen() {
   const [newTeamName, setNewTeamName] = useState("");
   const [newTeamCode, setNewTeamCode] = useState("");
 
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  // Data
+  const [myMemberships, setMyMemberships] = useState<Membership[]>([]);
+  const [team, setTeam] = useState<Team | null>(null);
+  const [members, setMembers] = useState<Membership[]>([]);
+  const [pendingRequests, setPendingRequests] = useState<Membership[]>([]);
 
-  // 1️⃣ Load user's current teamId
+  const activeMembership = useMemo(
+    () => myMemberships.find((m) => m.status === "active") ?? null,
+    [myMemberships]
+  );
+  const pendingMembership = useMemo(() => {
+    // if multiple pending, just pick first
+    return myMemberships.find((m) => m.status === "pending") ?? null;
+  }, [myMemberships]);
+
+  const myRole = activeMembership?.role ?? null;
+  const isAdmin = isAdminRole(myRole ?? undefined);
+
+  // Callables
+  const fnCreateTeam = useMemo(() => httpsCallable(functions, "createTeam"), []);
+  const fnJoinTeamWithCode = useMemo(() => httpsCallable(functions, "joinTeamWithCode"), []);
+  const fnLeaveTeam = useMemo(() => httpsCallable(functions, "leaveTeam"), []);
+  const fnApproveMembership = useMemo(() => httpsCallable(functions, "approveMembership"), []);
+  const fnDenyMembership = useMemo(() => httpsCallable(functions, "denyMembership"), []);
+  const fnKickMember = useMemo(() => httpsCallable(functions, "kickMember"), []);
+  const fnRotateInviteCode = useMemo(() => httpsCallable(functions, "rotateInviteCode"), []);
+  const fnCancelMyPending = useMemo(() => httpsCallable(functions, "cancelMyPendingMembership"), []);
+
+  // 1) Listen to my memberships
   useEffect(() => {
-    const load = async () => {
-      if (!user?.uid) {
-        setTeamId(null);
-        setTeam(null);
-        setLoading(false);
-        return;
-      }
-
-      try {
-        const userRef = doc(db, "users", user.uid);
-        const snap = await getDoc(userRef);
-
-        if (snap.exists()) {
-          const data = snap.data() as any;
-          const tid = data.teamId || null;
-          setTeamId(tid);
-
-          // also load the team document if we have one
-          if (tid) {
-            const teamRef = doc(db, "teams", tid);
-            const teamSnap = await getDoc(teamRef);
-            if (teamSnap.exists()) {
-              setTeam({ id: teamSnap.id, ...(teamSnap.data() as any) });
-            } else {
-              setTeam(null);
-            }
-          } else {
-            setTeam(null);
-          }
-        } else {
-          setTeamId(null);
-          setTeam(null);
-        }
-      } catch (err) {
-        console.error("Error loading team info:", err);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    load();
-  }, [user?.uid]);
-
-  const currentTeamLabel = useMemo(() => team?.name ?? team?.id ?? teamId ?? "", [
-    team?.name,
-    team?.id,
-    teamId,
-  ]);
-
-  const writeUserTeam = async (nextTeamId: string, nextTeamName: string) => {
-    if (!user?.uid) return;
-
-    const userRef = doc(db, "users", user.uid);
-    await setDoc(
-      userRef,
-      {
-        email: user.email ?? "",
-        teamId: nextTeamId,
-        teamName: nextTeamName,
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
-  };
-
-  const handleJoinTeam = async (codeRaw: string) => {
     if (!user?.uid) {
-      Alert.alert("Sign in required", "Please sign in to join a team.");
+      setMyMemberships([]);
+      setTeam(null);
+      setMembers([]);
+      setPendingRequests([]);
+      setLoading(false);
       return;
     }
 
-    const trimmed = normalizeCode(codeRaw);
-    if (!trimmed) {
+    const qMine = query(collection(db, "memberships"), where("userId", "==", user.uid));
+    const unsub = onSnapshot(
+      qMine,
+      (snap) => {
+        const list: Membership[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+        setMyMemberships(list);
+        setLoading(false);
+      },
+      (err) => {
+        console.warn("memberships(userId) listener failed:", err);
+        setLoading(false);
+      }
+    );
+
+    return () => unsub();
+  }, [user?.uid]);
+
+  // 2) Load team doc when I’m active in a team
+  useEffect(() => {
+    if (!activeMembership?.teamId) {
+      setTeam(null);
+      return;
+    }
+
+    const teamRef = doc(db, "teams", activeMembership.teamId);
+    const unsub = onSnapshot(
+      teamRef,
+      (snap) => {
+        if (!snap.exists()) {
+          setTeam(null);
+          return;
+        }
+        setTeam({ id: snap.id, ...(snap.data() as any) });
+      },
+      (err) => console.warn("team listener failed:", err)
+    );
+
+    return () => unsub();
+  }, [activeMembership?.teamId]);
+
+  // 3) Members list (active members) for this team
+  useEffect(() => {
+    const teamId = activeMembership?.teamId;
+    if (!teamId) {
+      setMembers([]);
+      return;
+    }
+
+    const qMembers = query(
+      collection(db, "memberships"),
+      where("teamId", "==", teamId),
+      where("status", "==", "active")
+    );
+
+    const unsub = onSnapshot(
+      qMembers,
+      (snap) => {
+        const list: Membership[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+        setMembers(list);
+      },
+      (err) => console.warn("members list listener failed:", err)
+    );
+
+    return () => unsub();
+  }, [activeMembership?.teamId]);
+
+  // 4) Pending join requests (admins only)
+  useEffect(() => {
+    const teamId = activeMembership?.teamId;
+    if (!teamId || !isAdmin) {
+      setPendingRequests([]);
+      return;
+    }
+
+    const qPending = query(
+      collection(db, "memberships"),
+      where("teamId", "==", teamId),
+      where("status", "==", "pending")
+    );
+
+    const unsub = onSnapshot(
+      qPending,
+      (snap) => {
+        const list: Membership[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+        setPendingRequests(list);
+      },
+      (err) => console.warn("pending list listener failed:", err)
+    );
+
+    return () => unsub();
+  }, [activeMembership?.teamId, isAdmin]);
+
+  const handleJoinTeam = async () => {
+    if (!user?.uid) return;
+
+    if (activeMembership) {
+      Alert.alert("Already in a team", "Leave your current team before joining another.");
+      return;
+    }
+    if (pendingMembership) {
+      Alert.alert("Request pending", "You already have a pending request. Cancel it first if you want to join a different team.");
+      return;
+    }
+
+    const code = normalizeCode(joinCode);
+    if (!code) {
       Alert.alert("Invalid code", "Please enter a team code.");
       return;
     }
-
-    const doJoin = async () => {
-      setSaving(true);
-      try {
-        const teamRef = doc(db, "teams", trimmed);
-        const teamSnap = await getDoc(teamRef);
-
-        if (!teamSnap.exists()) {
-          Alert.alert("Team not found", "Check the code and try again.");
-          return;
-        }
-
-        const teamData = teamSnap.data() as any;
-        const teamName = String(teamData?.name ?? teamSnap.id);
-
-        await writeUserTeam(trimmed, teamName);
-
-        setTeamId(trimmed);
-        setTeam({ id: teamSnap.id, ...(teamData as any) });
-        setJoinCode("");
-
-        Alert.alert("Joined team", "You’re now part of this team!");
-      } catch (err) {
-        console.error("Error joining team:", err);
-        Alert.alert("Error", "Could not join team. Please try again.");
-      } finally {
-        setSaving(false);
-      }
-    };
-
-    // If they're already in a team and joining a different one, confirm.
-    if (teamId && trimmed !== teamId) {
-      Alert.alert(
-        "Switch teams?",
-        `You’re currently in ${currentTeamLabel || "your team"}. Join ${trimmed} instead?`,
-        [
-          { text: "Cancel", style: "cancel" },
-          { text: "Join", style: "default", onPress: () => void doJoin() },
-        ]
-      );
+    if (!isValidTeamCode(code)) {
+      Alert.alert("Invalid code", "Use 3–24 chars: lowercase letters/numbers/hyphens only.");
       return;
     }
 
-    await doJoin();
+    setSaving(true);
+    try {
+      const res: any = await fnJoinTeamWithCode({ code });
+      const data = res?.data ?? {};
+      setJoinCode("");
+
+      if (data?.status === "pending") {
+        Alert.alert("Request sent", `Waiting for approval to join ${data?.teamName ?? data?.teamId ?? "the team"}.`);
+      } else {
+        Alert.alert("Joined", "You’re in!");
+      }
+    } catch (e) {
+      console.error("joinTeamWithCode failed:", e);
+      Alert.alert("Error", prettyFnError(e));
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleCreateTeam = async () => {
-    if (!user?.uid) {
-      Alert.alert("Sign in required", "Please sign in to create a team.");
+    if (!user?.uid) return;
+
+    if (activeMembership) {
+      Alert.alert("Already in a team", "Leave your current team before creating a new one.");
+      return;
+    }
+    if (pendingMembership) {
+      Alert.alert("Request pending", "Cancel your pending request before creating a team.");
       return;
     }
 
@@ -187,74 +273,130 @@ export default function TeamsScreen() {
       return;
     }
     if (!isValidTeamCode(code)) {
-      Alert.alert(
-        "Invalid team code",
-        "Use 3–24 characters: lowercase letters, numbers, and hyphens only."
-      );
+      Alert.alert("Invalid team code", "Use 3–24 chars: lowercase letters/numbers/hyphens only.");
       return;
     }
 
-    const doCreate = async () => {
-      setSaving(true);
-      try {
-        const teamRef = doc(db, "teams", code);
-        const existing = await getDoc(teamRef);
-
-        if (existing.exists()) {
-          Alert.alert("Code taken", "That team code is already in use. Pick another.");
-          return;
-        }
-
-        // Create team doc (teamId == code)
-        await setDoc(teamRef, {
-          name,
-          code,
-          createdBy: user.uid,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-
-        // Put creator into that team
-        await writeUserTeam(code, name);
-
-        // Update local UI
-        setTeamId(code);
-        setTeam({ id: code, name });
-
-        // Clear inputs
-        setNewTeamName("");
-        setNewTeamCode("");
-
-        Alert.alert("Team created", `Created ${name} (${code}).`);
-      } catch (err) {
-        console.error("Error creating team:", err);
-        Alert.alert("Error", "Could not create team. Please try again.");
-      } finally {
-        setSaving(false);
-      }
-    };
-
-    // If already in a team, confirm switching
-    if (teamId && teamId !== code) {
-      Alert.alert(
-        "Create and switch teams?",
-        `You’re currently in ${currentTeamLabel || "your team"}. Creating "${name}" will switch you to the new team.`,
-        [
-          { text: "Cancel", style: "cancel" },
-          { text: "Create", style: "default", onPress: () => void doCreate() },
-        ]
-      );
-      return;
+    setSaving(true);
+    try {
+      const res: any = await fnCreateTeam({ name, code });
+      const data = res?.data ?? {};
+      setNewTeamName("");
+      setNewTeamCode("");
+      Alert.alert("Team created", `Created ${data?.teamName ?? name}.\nInvite code: ${data?.inviteCode ?? code}`);
+    } catch (e) {
+      console.error("createTeam failed:", e);
+      Alert.alert("Error", prettyFnError(e));
+    } finally {
+      setSaving(false);
     }
+  };
 
-    await doCreate();
+  const handleLeaveTeam = async () => {
+    if (!activeMembership?.teamId) return;
+
+    Alert.alert("Leave team?", "You’ll lose access to team matches/chats.", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Leave",
+        style: "destructive",
+        onPress: async () => {
+          setSaving(true);
+          try {
+            await fnLeaveTeam({});
+          } catch (e) {
+            console.error("leaveTeam failed:", e);
+            Alert.alert("Error", prettyFnError(e));
+          } finally {
+            setSaving(false);
+          }
+        },
+      },
+    ]);
+  };
+
+  const handleCancelPending = async () => {
+    if (!pendingMembership?.teamId) return;
+
+    setSaving(true);
+    try {
+      await fnCancelMyPending({ teamId: pendingMembership.teamId });
+    } catch (e) {
+      console.error("cancelMyPendingMembership failed:", e);
+      Alert.alert("Error", prettyFnError(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleApprove = async (uid: string) => {
+    if (!activeMembership?.teamId) return;
+    setSaving(true);
+    try {
+      await fnApproveMembership({ teamId: activeMembership.teamId, userId: uid });
+    } catch (e) {
+      console.error("approveMembership failed:", e);
+      Alert.alert("Error", prettyFnError(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeny = async (uid: string) => {
+    if (!activeMembership?.teamId) return;
+    setSaving(true);
+    try {
+      await fnDenyMembership({ teamId: activeMembership.teamId, userId: uid });
+    } catch (e) {
+      console.error("denyMembership failed:", e);
+      Alert.alert("Error", prettyFnError(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleKick = async (uid: string) => {
+    if (!activeMembership?.teamId) return;
+    Alert.alert("Remove member?", "They’ll be removed from the team.", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Remove",
+        style: "destructive",
+        onPress: async () => {
+          setSaving(true);
+          try {
+            await fnKickMember({ teamId: activeMembership.teamId, userId: uid });
+          } catch (e) {
+            console.error("kickMember failed:", e);
+            Alert.alert("Error", prettyFnError(e));
+          } finally {
+            setSaving(false);
+          }
+        },
+      },
+    ]);
+  };
+
+  const handleRotateInvite = async () => {
+    if (!activeMembership?.teamId) return;
+    setSaving(true);
+    try {
+      const res: any = await fnRotateInviteCode({ teamId: activeMembership.teamId });
+      const data = res?.data ?? {};
+      Alert.alert("Invite code rotated", `New invite code: ${data?.inviteCode ?? ""}`);
+    } catch (e) {
+      console.error("rotateInviteCode failed:", e);
+      Alert.alert("Error", prettyFnError(e));
+    } finally {
+      setSaving(false);
+    }
   };
 
   if (loading) {
     return (
       <SafeAreaView style={styles.safe} edges={["top"]}>
         <View style={styles.container}>
-          <Text>Loading team info...</Text>
+          <Text>Loading…</Text>
         </View>
       </SafeAreaView>
     );
@@ -270,131 +412,202 @@ export default function TeamsScreen() {
     );
   }
 
+  const inviteCode = team?.inviteCode ?? team?.id ?? activeMembership?.teamId ?? "";
+
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <View style={styles.container}>
+      <ScrollView contentContainerStyle={styles.container}>
         <Text style={styles.title}>Your Team</Text>
 
-        {teamId && team ? (
+        {activeMembership && team ? (
           <View style={styles.card}>
             <Text style={styles.teamName}>{team.name ?? team.id}</Text>
-            {team.homeCity && (
-              <Text style={styles.teamMeta}>Home: {team.homeCity}</Text>
+            <Text style={styles.teamMeta}>Role: {activeMembership.role}</Text>
+            <Text style={styles.teamMeta}>Invite code: {inviteCode}</Text>
+
+            <View style={{ height: 10 }} />
+
+            <Button
+              title={saving ? "Working..." : "Leave team"}
+              onPress={handleLeaveTeam}
+              disabled={saving}
+              color="#d11"
+            />
+
+            {isAdmin && (
+              <>
+                <View style={{ height: 10 }} />
+                <Button
+                  title={saving ? "Working..." : "Rotate invite code"}
+                  onPress={handleRotateInvite}
+                  disabled={saving}
+                />
+              </>
             )}
-            {typeof team.defaultMaxPlayers === "number" && (
-              <Text style={styles.teamMeta}>
-                Default max players: {team.defaultMaxPlayers}
-              </Text>
-            )}
-            <Text style={styles.teamMeta}>Team code: {team.id}</Text>
+          </View>
+        ) : pendingMembership ? (
+          <View style={styles.card}>
+            <Text style={styles.teamName}>Request pending</Text>
+            <Text style={styles.teamMeta}>
+              Team: {pendingMembership.teamName ?? pendingMembership.teamId}
+            </Text>
+            <View style={{ height: 10 }} />
+            <Button
+              title={saving ? "Working..." : "Cancel request"}
+              onPress={handleCancelPending}
+              disabled={saving}
+              color="#d11"
+            />
           </View>
         ) : (
           <View style={styles.card}>
             <Text style={styles.teamMeta}>
-              You’re not in a team yet. Join an existing team using its code, or create a new team.
+              You’re not in a team yet. Join using a code, or create a new team.
             </Text>
           </View>
         )}
 
-        {/* Join by team code */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Join by team code</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="Enter team code (e.g. goats)"
-            value={joinCode}
-            onChangeText={setJoinCode}
-            autoCapitalize="none"
-            editable={!saving}
-          />
-          <Button
-            title={saving ? "Working..." : "Join Team"}
-            onPress={() => handleJoinTeam(joinCode)}
-            disabled={saving}
-          />
-        </View>
+        {/* Admin: pending requests */}
+        {activeMembership && isAdmin && pendingRequests.length > 0 && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Pending requests</Text>
 
-        {/* Create new team */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Create a new team</Text>
+            {pendingRequests.map((r) => (
+              <View key={r.id} style={styles.rowCard}>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontWeight: "700" }}>
+                    {r.userDisplayName ?? r.userEmail ?? r.userId}
+                  </Text>
+                  <Text style={{ color: "#666", marginTop: 2 }}>
+                    {r.userEmail ?? r.userId}
+                  </Text>
+                </View>
 
-          <Text style={styles.label}>Team name</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="e.g. goatfc"
-            value={newTeamName}
-            onChangeText={setNewTeamName}
-            editable={!saving}
-          />
+                <View style={{ gap: 8 }}>
+                  <Button title="Approve" onPress={() => handleApprove(r.userId)} disabled={saving} />
+                  <Button title="Deny" onPress={() => handleDeny(r.userId)} disabled={saving} color="#d11" />
+                </View>
+              </View>
+            ))}
+          </View>
+        )}
 
-          <Text style={styles.label}>Team code</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="e.g. goats (letters/numbers/hyphens)"
-            value={newTeamCode}
-            onChangeText={setNewTeamCode}
-            autoCapitalize="none"
-            editable={!saving}
-          />
-          <Text style={styles.helper}>
-            3–24 chars, lowercase letters/numbers/hyphens only.
-          </Text>
+        {/* Members list */}
+        {activeMembership && members.length > 0 && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Members</Text>
 
-          <Button
-            title={saving ? "Working..." : "Create Team"}
-            onPress={handleCreateTeam}
-            disabled={saving}
-          />
-        </View>
-      </View>
+            {members.map((m) => {
+              const isMe = m.userId === user.uid;
+              const canKick = isAdmin && !isMe && m.role !== "owner"; // keep it simple
+              return (
+                <View key={m.id} style={styles.rowCard}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontWeight: "700" }}>
+                      {m.userDisplayName ?? m.userEmail ?? m.userId} {isMe ? "(you)" : ""}
+                    </Text>
+                    <Text style={{ color: "#666", marginTop: 2 }}>
+                      {m.role}
+                    </Text>
+                  </View>
+
+                  {canKick ? (
+                    <Button title="Remove" color="#d11" onPress={() => handleKick(m.userId)} disabled={saving} />
+                  ) : null}
+                </View>
+              );
+            })}
+          </View>
+        )}
+
+        {/* Join (only if not active/pending) */}
+        {!activeMembership && !pendingMembership && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Join by team code</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Enter team code"
+              value={joinCode}
+              onChangeText={setJoinCode}
+              autoCapitalize="none"
+              editable={!saving}
+            />
+            <Button
+              title={saving ? "Working..." : "Request to join"}
+              onPress={handleJoinTeam}
+              disabled={saving}
+            />
+          </View>
+        )}
+
+        {/* Create (only if not active/pending) */}
+        {!activeMembership && !pendingMembership && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Create a new team</Text>
+
+            <Text style={styles.label}>Team name</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="e.g. goatfc"
+              value={newTeamName}
+              onChangeText={setNewTeamName}
+              editable={!saving}
+            />
+
+            <Text style={styles.label}>Team code</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="e.g. goatfc (letters/numbers/hyphens)"
+              value={newTeamCode}
+              onChangeText={setNewTeamCode}
+              autoCapitalize="none"
+              editable={!saving}
+            />
+            <Text style={styles.helper}>3–24 chars, lowercase letters/numbers/hyphens only.</Text>
+
+            <Button
+              title={saving ? "Working..." : "Create team"}
+              onPress={handleCreateTeam}
+              disabled={saving}
+            />
+          </View>
+        )}
+
+        <View style={{ height: 30 }} />
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
-  container: { flex: 1, padding: 16 },
-  title: {
-    fontSize: 22,
-    fontWeight: "700",
-    marginBottom: 16,
-  },
+  container: { padding: 16 },
+  title: { fontSize: 22, fontWeight: "700", marginBottom: 16 },
   card: {
     padding: 16,
     borderRadius: 12,
     borderWidth: 1,
     borderColor: "#ddd",
-    marginBottom: 24,
+    marginBottom: 20,
+    backgroundColor: "#fff",
   },
-  teamName: {
-    fontSize: 20,
-    fontWeight: "700",
-    marginBottom: 4,
-  },
-  teamMeta: {
-    fontSize: 14,
-    color: "#555",
-    marginTop: 2,
-  },
-  section: {
-    marginBottom: 24,
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: "600",
-    marginBottom: 8,
-  },
-  label: {
-    fontSize: 14,
-    fontWeight: "600",
-    marginBottom: 6,
-    marginTop: 8,
-  },
-  helper: {
-    fontSize: 12,
-    color: "#666",
+  teamName: { fontSize: 18, fontWeight: "800", marginBottom: 6 },
+  teamMeta: { fontSize: 14, color: "#555", marginTop: 2 },
+  section: { marginBottom: 22 },
+  sectionTitle: { fontSize: 16, fontWeight: "700", marginBottom: 10 },
+  rowCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#eee",
+    backgroundColor: "#fff",
     marginBottom: 10,
   },
+  label: { fontSize: 14, fontWeight: "600", marginBottom: 6, marginTop: 8 },
+  helper: { fontSize: 12, color: "#666", marginBottom: 10 },
   input: {
     borderWidth: 1,
     borderColor: "#ccc",

@@ -1,10 +1,13 @@
+import * as crypto from "crypto";
 import * as admin from "firebase-admin";
 import { onDocumentCreated, onDocumentWritten } from "firebase-functions/v2/firestore";
+import { HttpsError, onCall } from "firebase-functions/v2/https";
 
 admin.initializeApp();
 const db = admin.firestore();
 const { FieldValue } = admin.firestore;
 
+// -------------------- shared helpers --------------------
 function uniqStrings(xs: any[]): string[] {
   return Array.from(
     new Set(
@@ -148,11 +151,426 @@ async function sendExpoPushMany(messages: PushMessage[], tokenToUid?: Map<string
   }
 }
 
+// -------------------- OPTION 5: TEAMS + MEMBERSHIPS --------------------
+function normalizeCode(raw: any) {
+  return String(raw ?? "").trim().toLowerCase();
+}
+function isValidTeamCode(code: string) {
+  return /^[a-z0-9-]{3,24}$/.test(code);
+}
+function membershipDocId(teamId: string, uid: string) {
+  return `${teamId}_${uid}`;
+}
+async function requireAuth(req: any) {
+  const uid = req?.auth?.uid;
+  if (!uid) throw new HttpsError("unauthenticated", "Sign in required.");
+  return String(uid);
+}
+function randomInviteCode() {
+  // hex => [0-9a-f], valid under our regex
+  return crypto.randomBytes(6).toString("hex"); // 12 chars
+}
+
+async function getUserTeamIdQuick(uid: string): Promise<string | null> {
+  const u = await db.collection("users").doc(uid).get();
+  if (!u.exists) return null;
+  const d = u.data() as any;
+  return d?.teamId ? String(d.teamId) : null;
+}
+
+async function getAnyActiveMembershipTeamId(uid: string): Promise<string | null> {
+  const q = await db
+    .collection("memberships")
+    .where("userId", "==", uid)
+    .where("status", "==", "active")
+    .limit(1)
+    .get();
+  if (q.empty) return null;
+  const m = q.docs[0].data() as any;
+  return m?.teamId ? String(m.teamId) : null;
+}
+
+async function getMembership(teamId: string, uid: string) {
+  const id = membershipDocId(teamId, uid);
+  const ref = db.collection("memberships").doc(id);
+  const snap = await ref.get();
+  const data = snap.exists ? (snap.data() as any) : null;
+  return { ref, snap, data };
+}
+
+async function requireAdminOrOwner(teamId: string, uid: string) {
+  const { data } = await getMembership(teamId, uid);
+  if (!data || data.status !== "active") {
+    throw new HttpsError("permission-denied", "Not an active member.");
+  }
+  if (data.role !== "owner" && data.role !== "admin") {
+    throw new HttpsError("permission-denied", "Admin/owner required.");
+  }
+  return data;
+}
+
+async function getUserIdentitySnapshot(uid: string) {
+  let userEmail = "";
+  let userDisplayName = "";
+  try {
+    const u = await admin.auth().getUser(uid);
+    userEmail = u.email ?? "";
+    userDisplayName = u.displayName ?? "";
+  } catch {
+    // fallback to Firestore user doc if needed
+    try {
+      const s = await db.collection("users").doc(uid).get();
+      if (s.exists) {
+        const d = s.data() as any;
+        userEmail = String(d?.email ?? userEmail);
+        userDisplayName = String(d?.displayName ?? userDisplayName);
+      }
+    } catch {}
+  }
+  return { userEmail, userDisplayName };
+}
+
 /**
- * Always keep these fields correct so your matches list can render:
- * - matches/{matchId}.confirmedYesCount
- * - matches/{matchId}.waitlistCount
+ * createTeam({ name, code })
+ * - creates teams/{code}
+ * - creates memberships/{code}_{uid} as owner/active
+ * - sets users/{uid}.teamId/teamName
  */
+export const createTeam = onCall(async (req) => {
+  const uid = await requireAuth(req);
+
+  const name = String(req.data?.name ?? "").trim();
+  const code = normalizeCode(req.data?.code);
+
+  if (!name) throw new HttpsError("invalid-argument", "Team name required.");
+  if (!code) throw new HttpsError("invalid-argument", "Team code required.");
+  if (!isValidTeamCode(code)) throw new HttpsError("invalid-argument", "Invalid team code.");
+
+  // Enforce single-team membership
+  const currentTeamId = (await getUserTeamIdQuick(uid)) ?? (await getAnyActiveMembershipTeamId(uid));
+  if (currentTeamId) throw new HttpsError("failed-precondition", "Leave your current team first.");
+
+  const teamRef = db.collection("teams").doc(code);
+  const existing = await teamRef.get();
+  if (existing.exists) throw new HttpsError("already-exists", "That team code is taken.");
+
+  const inviteCode = code; // start as same as teamId; rotate later
+  const { userEmail, userDisplayName } = await getUserIdentitySnapshot(uid);
+
+  const memRef = db.collection("memberships").doc(membershipDocId(code, uid));
+  const userRef = db.collection("users").doc(uid);
+
+  await db.runTransaction(async (tx) => {
+    tx.set(teamRef, {
+      name,
+      code,
+      inviteCode,
+      createdBy: uid,
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    tx.set(memRef, {
+      teamId: code,
+      teamName: name,
+      userId: uid,
+      userEmail,
+      userDisplayName,
+      role: "owner",
+      status: "active",
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    tx.set(
+      userRef,
+      {
+        teamId: code,
+        teamName: name,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+  });
+
+  return { teamId: code, teamName: name, inviteCode };
+});
+
+/**
+ * joinTeamWithCode({ code })
+ * - resolves code to teams/{teamId} OR teams where inviteCode==code
+ * - creates memberships/{teamId}_{uid} as member/pending
+ */
+export const joinTeamWithCode = onCall(async (req) => {
+  const uid = await requireAuth(req);
+
+  const code = normalizeCode(req.data?.code);
+  if (!code) throw new HttpsError("invalid-argument", "Code required.");
+  if (!isValidTeamCode(code)) throw new HttpsError("invalid-argument", "Invalid code.");
+
+  // Enforce single-team membership
+  const currentTeamId = (await getUserTeamIdQuick(uid)) ?? (await getAnyActiveMembershipTeamId(uid));
+  if (currentTeamId) throw new HttpsError("failed-precondition", "You’re already in a team. Leave first.");
+
+  // Resolve teamId
+  let teamId: string | null = null;
+  let teamName: string | null = null;
+
+  const directRef = db.collection("teams").doc(code);
+  const directSnap = await directRef.get();
+  if (directSnap.exists) {
+    teamId = directSnap.id;
+    teamName = String((directSnap.data() as any)?.name ?? directSnap.id);
+  } else {
+    const q = await db.collection("teams").where("inviteCode", "==", code).limit(1).get();
+    if (!q.empty) {
+      const t = q.docs[0];
+      teamId = t.id;
+      teamName = String((t.data() as any)?.name ?? t.id);
+    }
+  }
+
+  if (!teamId) throw new HttpsError("not-found", "Team not found.");
+
+  const memId = membershipDocId(teamId, uid);
+  const memRef = db.collection("memberships").doc(memId);
+  const memSnap = await memRef.get();
+
+  if (memSnap.exists) {
+    const m = memSnap.data() as any;
+    return { teamId, teamName, status: m?.status ?? "pending" };
+  }
+
+  const { userEmail, userDisplayName } = await getUserIdentitySnapshot(uid);
+
+  await memRef.set({
+    teamId,
+    teamName,
+    userId: uid,
+    userEmail,
+    userDisplayName,
+    role: "member",
+    status: "pending",
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+
+  return { teamId, teamName, status: "pending" };
+});
+
+export const cancelMyPendingMembership = onCall(async (req) => {
+  const uid = await requireAuth(req);
+  const teamId = normalizeCode(req.data?.teamId);
+  if (!teamId) throw new HttpsError("invalid-argument", "teamId required.");
+
+  const { ref, data } = await getMembership(teamId, uid);
+  if (!data || data.status !== "pending") return { ok: true };
+
+  await ref.set({ status: "left", updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+  return { ok: true };
+});
+
+export const approveMembership = onCall(async (req) => {
+  const uid = await requireAuth(req);
+
+  const teamId = normalizeCode(req.data?.teamId);
+  const userId = String(req.data?.userId ?? "").trim();
+  if (!teamId || !userId) throw new HttpsError("invalid-argument", "teamId and userId required.");
+
+  await requireAdminOrOwner(teamId, uid);
+
+  // Prevent approving someone already in a team
+  const targetCurrentTeam =
+    (await getUserTeamIdQuick(userId)) ?? (await getAnyActiveMembershipTeamId(userId));
+  if (targetCurrentTeam) {
+    throw new HttpsError("failed-precondition", "That user is already in a team.");
+  }
+
+  const memRef = db.collection("memberships").doc(membershipDocId(teamId, userId));
+  const memSnap = await memRef.get();
+  if (!memSnap.exists) throw new HttpsError("not-found", "Membership request not found.");
+
+  const m = memSnap.data() as any;
+  if (m.status !== "pending") return { ok: true };
+
+  const teamRef = db.collection("teams").doc(teamId);
+  const teamSnap = await teamRef.get();
+  const teamName = teamSnap.exists ? String((teamSnap.data() as any)?.name ?? teamId) : teamId;
+
+  const targetUserRef = db.collection("users").doc(userId);
+
+  await db.runTransaction(async (tx) => {
+    tx.set(memRef, { status: "active", teamName, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+    tx.set(
+      targetUserRef,
+      { teamId, teamName, updatedAt: FieldValue.serverTimestamp() },
+      { merge: true }
+    );
+  });
+
+  return { ok: true };
+});
+
+export const denyMembership = onCall(async (req) => {
+  const uid = await requireAuth(req);
+
+  const teamId = normalizeCode(req.data?.teamId);
+  const userId = String(req.data?.userId ?? "").trim();
+  if (!teamId || !userId) throw new HttpsError("invalid-argument", "teamId and userId required.");
+
+  await requireAdminOrOwner(teamId, uid);
+
+  const memRef = db.collection("memberships").doc(membershipDocId(teamId, userId));
+  const memSnap = await memRef.get();
+  if (!memSnap.exists) return { ok: true };
+
+  await memRef.set({ status: "removed", updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+  return { ok: true };
+});
+
+export const leaveTeam = onCall(async (req) => {
+  const uid = await requireAuth(req);
+
+  let teamId = await getUserTeamIdQuick(uid);
+  if (!teamId) teamId = await getAnyActiveMembershipTeamId(uid);
+  if (!teamId) return { ok: true };
+
+  const { ref: memRef, data } = await getMembership(teamId, uid);
+  if (data?.role === "owner") {
+    throw new HttpsError("failed-precondition", "Owners can’t leave their team (transfer ownership first).");
+  }
+
+  const userRef = db.collection("users").doc(uid);
+
+  await db.runTransaction(async (tx) => {
+    tx.set(memRef, { status: "left", updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+    tx.set(
+      userRef,
+      {
+        teamId: FieldValue.delete(),
+        teamName: FieldValue.delete(),
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+  });
+
+  return { ok: true };
+});
+
+export const kickMember = onCall(async (req) => {
+  const uid = await requireAuth(req);
+
+  const teamId = normalizeCode(req.data?.teamId);
+  const userId = String(req.data?.userId ?? "").trim();
+  if (!teamId || !userId) throw new HttpsError("invalid-argument", "teamId and userId required.");
+  if (userId === uid) throw new HttpsError("invalid-argument", "You can’t remove yourself.");
+
+  await requireAdminOrOwner(teamId, uid);
+
+  const targetMemRef = db.collection("memberships").doc(membershipDocId(teamId, userId));
+  const targetMemSnap = await targetMemRef.get();
+  if (!targetMemSnap.exists) return { ok: true };
+
+  const targetMem = targetMemSnap.data() as any;
+  if (targetMem.role === "owner") throw new HttpsError("failed-precondition", "Can’t remove the owner.");
+
+  const targetUserRef = db.collection("users").doc(userId);
+
+  await db.runTransaction(async (tx) => {
+    tx.set(targetMemRef, { status: "removed", updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+
+    const u = await tx.get(targetUserRef);
+    const currentTeamId = u.exists ? String((u.data() as any)?.teamId ?? "") : "";
+    if (currentTeamId === teamId) {
+      tx.set(
+        targetUserRef,
+        {
+          teamId: FieldValue.delete(),
+          teamName: FieldValue.delete(),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
+  });
+
+  return { ok: true };
+});
+
+export const rotateInviteCode = onCall(async (req) => {
+  const uid = await requireAuth(req);
+  const teamId = normalizeCode(req.data?.teamId);
+  if (!teamId) throw new HttpsError("invalid-argument", "teamId required.");
+
+  await requireAdminOrOwner(teamId, uid);
+
+  const inviteCode = randomInviteCode();
+  await db.collection("teams").doc(teamId).set(
+    {
+      inviteCode,
+      inviteCodeUpdatedAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  );
+
+  return { inviteCode };
+});
+
+/**
+ * Sync users/{uid}.teamId/teamName from memberships (source of truth)
+ */
+export const onMembershipWriteSyncUser = onDocumentWritten("memberships/{id}", async (event) => {
+  const before = event.data?.before?.data() as any | undefined;
+  const after = event.data?.after?.data() as any | undefined;
+
+  const m = after ?? before;
+  if (!m?.teamId || !m?.userId) return;
+
+  const teamId = String(m.teamId);
+  const userId = String(m.userId);
+
+  const beforeStatus = String(before?.status ?? "");
+  const afterStatus = String(after?.status ?? "");
+
+  // only act when status changes (or doc created/deleted)
+  if (beforeStatus === afterStatus && beforeStatus) return;
+
+  const userRef = db.collection("users").doc(userId);
+
+  if (afterStatus === "active") {
+    const teamSnap = await db.collection("teams").doc(teamId).get();
+    const teamName = teamSnap.exists ? String((teamSnap.data() as any)?.name ?? teamId) : teamId;
+
+    await userRef.set(
+      {
+        teamId,
+        teamName,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+    return;
+  }
+
+  if (afterStatus === "removed" || afterStatus === "left") {
+    const u = await userRef.get();
+    const currentTeamId = u.exists ? String((u.data() as any)?.teamId ?? "") : "";
+    if (currentTeamId === teamId) {
+      await userRef.set(
+        {
+          teamId: FieldValue.delete(),
+          teamName: FieldValue.delete(),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
+  }
+});
+
+// -------------------- MATCH COUNTS + WAITLIST PROMOTION --------------------
 async function recomputeCounts(matchId: string) {
   const rsvpsCol = db.collection("rsvps");
 
@@ -258,9 +676,7 @@ async function promoteIfNeeded(matchId: string) {
   await sendExpoPushMany(pushes, tokenToUid);
 }
 
-/**
- * ✅ Chat notifications + ✅ Match preview fields (lastMessage*) + ✅ Seq counters
- */
+// -------------------- CHAT NOTIFICATIONS + MATCH PREVIEW FIELDS + SEQ --------------------
 export const onMatchMessageCreate = onDocumentCreated("matchMessages/{msgId}", async (event) => {
   const snap = event.data;
   if (!snap) return;
@@ -356,9 +772,7 @@ export const onMatchMessageCreate = onDocumentCreated("matchMessages/{msgId}", a
 
   const recipientsAfterMute = finalRecipientIds.filter((uid) => !mutedSet.has(uid));
 
-  // ✅ IMPORTANT FIX:
-  // Token-level mute suppression in case the same Expo Go token is stored under multiple users.
-  // If ANY owner UID of a token is muted for this match, we skip that token entirely.
+  // ✅ Token-level mute suppression (handles Expo Go token shared across accounts)
   const tokensByUid = new Map<string, string[]>();
   const tokenOwners = new Map<string, Set<string>>();
 
@@ -401,7 +815,6 @@ export const onMatchMessageCreate = onDocumentCreated("matchMessages/{msgId}", a
     for (const t of tokens) {
       if (senderTokenSet.has(t)) continue;
 
-      // ✅ Skip tokens that belong to ANY muted UID (prevents cross-account token leakage)
       if (mutedTokens.has(t)) {
         mutedTokenSkipHits++;
         continue;
@@ -422,7 +835,6 @@ export const onMatchMessageCreate = onDocumentCreated("matchMessages/{msgId}", a
     }
   }
 
-  // write debug counters so you can verify what happened per message
   await msgRef.set(
     {
       notifyRecipientCountBeforeMute: finalRecipientIds.length,
@@ -450,11 +862,7 @@ export const onMatchMessageCreate = onDocumentCreated("matchMessages/{msgId}", a
   );
 });
 
-/**
- * Trigger on ANY RSVP create/update/delete:
- * 1) Try promotion (best-effort)
- * 2) ALWAYS recompute counts so the Matches tab stays correct
- */
+// -------------------- RSVP WRITE TRIGGER --------------------
 export const onRsvpWrite = onDocumentWritten("rsvps/{rsvpId}", async (event) => {
   const before = event.data?.before?.data() as any | undefined;
   const after = event.data?.after?.data() as any | undefined;
