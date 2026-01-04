@@ -412,7 +412,7 @@ export default function TeamsScreen() {
     );
   }
 
-  const inviteCode = team?.inviteCode ?? team?.id ?? activeMembership?.teamId ?? "";
+  const inviteCode = team?.inviteCode ?? "";
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>

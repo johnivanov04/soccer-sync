@@ -53,9 +53,7 @@ async function getMutedUidsForMatch(uids: string[], matchId: string): Promise<Se
   const list = uniqStrings(uids);
   if (!matchId || list.length === 0) return new Set();
 
-  const refs = list.map((uid) =>
-    db.collection("users").doc(uid).collection("chatPrefs").doc(matchId)
-  );
+  const refs = list.map((uid) => db.collection("users").doc(uid).collection("chatPrefs").doc(matchId));
 
   const snaps = await (db as any).getAll(...refs);
 
@@ -298,7 +296,8 @@ export const createTeam = onCall(async (req) => {
 
 /**
  * joinTeamWithCode({ code })
- * - resolves code to teams/{teamId} OR teams where inviteCode==code
+ * ✅ FIX: resolve STRICTLY by inviteCode (rotatable)
+ * - finds team via teams where inviteCode == code
  * - creates memberships/{teamId}_{uid} as member/pending
  */
 export const joinTeamWithCode = onCall(async (req) => {
@@ -312,25 +311,13 @@ export const joinTeamWithCode = onCall(async (req) => {
   const currentTeamId = (await getUserTeamIdQuick(uid)) ?? (await getAnyActiveMembershipTeamId(uid));
   if (currentTeamId) throw new HttpsError("failed-precondition", "You’re already in a team. Leave first.");
 
-  // Resolve teamId
-  let teamId: string | null = null;
-  let teamName: string | null = null;
+  // ✅ Resolve team STRICTLY by inviteCode (not by doc id)
+  const q = await db.collection("teams").where("inviteCode", "==", code).limit(1).get();
+  if (q.empty) throw new HttpsError("not-found", "Invite code is invalid.");
 
-  const directRef = db.collection("teams").doc(code);
-  const directSnap = await directRef.get();
-  if (directSnap.exists) {
-    teamId = directSnap.id;
-    teamName = String((directSnap.data() as any)?.name ?? directSnap.id);
-  } else {
-    const q = await db.collection("teams").where("inviteCode", "==", code).limit(1).get();
-    if (!q.empty) {
-      const t = q.docs[0];
-      teamId = t.id;
-      teamName = String((t.data() as any)?.name ?? t.id);
-    }
-  }
-
-  if (!teamId) throw new HttpsError("not-found", "Team not found.");
+  const t = q.docs[0];
+  const teamId = t.id;
+  const teamName = String((t.data() as any)?.name ?? teamId);
 
   const memId = membershipDocId(teamId, uid);
   const memRef = db.collection("memberships").doc(memId);
@@ -401,11 +388,7 @@ export const approveMembership = onCall(async (req) => {
 
   await db.runTransaction(async (tx) => {
     tx.set(memRef, { status: "active", teamName, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
-    tx.set(
-      targetUserRef,
-      { teamId, teamName, updatedAt: FieldValue.serverTimestamp() },
-      { merge: true }
-    );
+    tx.set(targetUserRef, { teamId, teamName, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
   });
 
   return { ok: true };
@@ -847,19 +830,13 @@ export const onMatchMessageCreate = onDocumentCreated("matchMessages/{msgId}", a
   );
 
   if (pushes.length === 0) {
-    await msgRef.set(
-      { notifiedAt: FieldValue.serverTimestamp(), notifyTokenCount: 0 },
-      { merge: true }
-    );
+    await msgRef.set({ notifiedAt: FieldValue.serverTimestamp(), notifyTokenCount: 0 }, { merge: true });
     return;
   }
 
   await sendExpoPushMany(pushes, tokenToUid);
 
-  await msgRef.set(
-    { notifiedAt: FieldValue.serverTimestamp(), notifyTokenCount: pushes.length },
-    { merge: true }
-  );
+  await msgRef.set({ notifiedAt: FieldValue.serverTimestamp(), notifyTokenCount: pushes.length }, { merge: true });
 });
 
 // -------------------- RSVP WRITE TRIGGER --------------------
