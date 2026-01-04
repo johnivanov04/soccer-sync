@@ -1,14 +1,15 @@
 // app/(app)/(tabs)/matches.tsx
 import { useRouter } from "expo-router";
-import { collection, doc, onSnapshot, orderBy, query, where } from "firebase/firestore";
+import { collection, doc, orderBy, query, where, type DocumentData, type QueryDocumentSnapshot } from "firebase/firestore";
 import React, { useEffect, useMemo, useState } from "react";
 import { Button, FlatList, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
+import { onSnapshotSafe } from "../../../src/firestoreSafe";
 
 const RSVP_STATUSES = ["yes", "maybe", "no"] as const;
 type RsvpStatus = (typeof RSVP_STATUSES)[number];
-
+type QDoc = QueryDocumentSnapshot<DocumentData>;
 type MatchStatus = "scheduled" | "played" | "cancelled" | string;
 
 type Match = {
@@ -25,14 +26,21 @@ type Match = {
   rsvpDeadline?: any;
   createdBy?: string;
 
-  // written by Cloud Function
   lastMessageAt?: any;
   lastMessageText?: string;
   lastMessageSenderId?: string;
   lastMessageSenderName?: string;
 
-  // ✅ new: written by Cloud Function
   lastMessageSeq?: number;
+};
+
+type Membership = {
+  id: string;
+  teamId: string;
+  teamName?: string;
+  userId: string;
+  role: "owner" | "admin" | "member";
+  status: "pending" | "active" | "removed" | "left";
 };
 
 type MyRsvpMini = {
@@ -147,7 +155,6 @@ function getMyRsvpBadge(r?: MyRsvpMini | null) {
   return { label: "⬜ No", variant: "no" as const };
 }
 
-// No hooks in renderItem — plain helper
 function formatPreviewTimeFromDate(d: Date | null): string {
   if (!d) return "";
   const now = new Date();
@@ -165,19 +172,19 @@ export default function MatchesScreen() {
   const router = useRouter();
   const { user } = useAuth();
 
+  const [activeMembership, setActiveMembership] = useState<Membership | null>(null);
   const [teamId, setTeamId] = useState<string | null>(null);
   const [teamName, setTeamName] = useState<string | null>(null);
   const [teamLoading, setTeamLoading] = useState(true);
 
   const [matches, setMatches] = useState<Match[]>([]);
   const [myRsvpByMatchId, setMyRsvpByMatchId] = useState<Record<string, MyRsvpMini>>({});
-
-  // per-match read state
   const [lastReadByMatchId, setLastReadByMatchId] = useState<Record<string, ChatReadMini>>({});
 
-  // 1) Subscribe to current user's teamId
+  // ✅ 1) Source of truth: memberships (not users/{uid}.teamId)
   useEffect(() => {
     if (!user?.uid) {
+      setActiveMembership(null);
       setTeamId(null);
       setTeamName(null);
       setTeamLoading(false);
@@ -186,42 +193,46 @@ export default function MatchesScreen() {
 
     setTeamLoading(true);
 
-    const userRef = doc(db, "users", user.uid);
-    const unsub = onSnapshot(
-      userRef,
+    const qMine = query(collection(db, "memberships"), where("userId", "==", user.uid));
+    const unsub = onSnapshotSafe(
+      qMine,
       (snap) => {
-        if (snap.exists()) {
-          const data = snap.data() as any;
-          const nextTeamId = data.teamId ?? data.teamCode ?? data.team ?? data.team_id ?? null;
+        const list: Membership[] = snap.docs.map((d: QDoc) => ({ id: d.id, ...(d.data() as any) }));
+        const active = list.find((m) => m.status === "active") ?? null;
 
-          setTeamId(nextTeamId ?? null);
-          setTeamName(data.teamName ?? null);
-        } else {
-          setTeamId(null);
-          setTeamName(null);
-        }
+        setActiveMembership(active);
+        setTeamId(active?.teamId ?? null);
+        setTeamName(active?.teamName ?? null);
+
         setTeamLoading(false);
       },
-      (err) => {
-        console.error("Error listening to user team", err);
-        setTeamId(null);
-        setTeamName(null);
-        setTeamLoading(false);
+      {
+        label: "matches:memberships(userId)",
+        onError: (err) => {
+          console.warn("memberships(userId) listener failed:", err);
+          setActiveMembership(null);
+          setTeamId(null);
+          setTeamName(null);
+          setTeamLoading(false);
+        },
+        onPermissionDenied: () => {
+          setActiveMembership(null);
+          setTeamId(null);
+          setTeamName(null);
+          setTeamLoading(false);
+        },
       }
     );
 
     return () => unsub();
   }, [user?.uid]);
 
-  // 2) Resolve team name from teams/{teamId}
+  // ✅ 2) Optional: resolve team name from teams/{teamId} (only while active)
   useEffect(() => {
-    if (!teamId) {
-      setTeamName(null);
-      return;
-    }
+    if (!teamId || !activeMembership) return;
 
     const teamRef = doc(db, "teams", teamId);
-    const unsub = onSnapshot(
+    const unsub = onSnapshotSafe(
       teamRef,
       (snap) => {
         if (snap.exists()) {
@@ -231,18 +242,20 @@ export default function MatchesScreen() {
           setTeamName(teamId);
         }
       },
-      (err) => {
-        console.error("Team doc listener error", err);
-        setTeamName(teamId);
+      {
+        label: "matches:teamDoc",
+        onPermissionDenied: () => {
+          // during transitions this can happen; keep UI stable but don't crash
+        },
       }
     );
 
     return () => unsub();
-  }, [teamId]);
+  }, [teamId, !!activeMembership]);
 
-  // 3) Subscribe to matches for team (keep this query simple; we sort client-side)
+  // ✅ 3) Subscribe to matches ONLY when membership is active
   useEffect(() => {
-    if (!teamId) {
+    if (!teamId || !activeMembership) {
       setMatches([]);
       return;
     }
@@ -250,24 +263,29 @@ export default function MatchesScreen() {
     const matchesCol = collection(db, "matches");
     const q = query(matchesCol, where("teamId", "==", teamId), orderBy("startDateTime", "asc"));
 
-    const unsub = onSnapshot(
+    const unsub = onSnapshotSafe(
       q,
       (snapshot) => {
-        const data: Match[] = snapshot.docs.map((d) => ({
+        const data: Match[] = snapshot.docs.map((d: QDoc) => ({
           id: d.id,
           ...(d.data() as any),
         }));
         setMatches(data);
       },
-      (err) => {
-        console.error("Matches subscription error", err);
+      {
+        label: "matches:matches(teamId)",
+        onPermissionDenied: () => setMatches([]),
+        onError: (err) => {
+          console.warn("Matches subscription error", err);
+          setMatches([]);
+        },
       }
     );
 
     return () => unsub();
-  }, [teamId]);
+  }, [teamId, !!activeMembership]);
 
-  // 4) Subscribe to MY RSVPs
+  // 4) Subscribe to MY RSVPs (always allowed for own docs)
   useEffect(() => {
     if (!user?.uid) {
       setMyRsvpByMatchId({});
@@ -277,11 +295,11 @@ export default function MatchesScreen() {
     const rsvpsCol = collection(db, "rsvps");
     const q = query(rsvpsCol, where("userId", "==", user.uid));
 
-    const unsub = onSnapshot(
+    const unsub = onSnapshotSafe(
       q,
       (snapshot) => {
         const map: Record<string, MyRsvpMini> = {};
-        snapshot.docs.forEach((d) => {
+        snapshot.docs.forEach((d: QDoc) => {
           const data = d.data() as any;
           const mid = typeof data?.matchId === "string" ? data.matchId : null;
           if (!mid) return;
@@ -294,15 +312,16 @@ export default function MatchesScreen() {
         });
         setMyRsvpByMatchId(map);
       },
-      (err) => {
-        console.error("My RSVPs subscription error", err);
+      {
+        label: "matches:myRsvps",
+        onError: (err) => console.warn("My RSVPs subscription error", err),
       }
     );
 
     return () => unsub();
   }, [user?.uid]);
 
-  // 5) Subscribe to chatReads
+  // 5) Subscribe to chatReads (always allowed for own subcollection)
   useEffect(() => {
     if (!user?.uid) {
       setLastReadByMatchId({});
@@ -310,11 +329,11 @@ export default function MatchesScreen() {
     }
 
     const readsCol = collection(db, "users", user.uid, "chatReads");
-    const unsub = onSnapshot(
+    const unsub = onSnapshotSafe(
       readsCol,
       (snap) => {
         const map: Record<string, ChatReadMini> = {};
-        snap.docs.forEach((d) => {
+        snap.docs.forEach((d: QDoc) => {
           const data = d.data() as any;
           map[d.id] = {
             lastReadAt: data?.lastReadAt ?? null,
@@ -323,40 +342,34 @@ export default function MatchesScreen() {
         });
         setLastReadByMatchId(map);
       },
-      (err) => console.error("chatReads subscription error:", err)
+      {
+        label: "matches:chatReads",
+        onError: (err) => console.warn("chatReads subscription error:", err),
+      }
     );
 
     return () => unsub();
   }, [user?.uid]);
 
-  /**
-   * ✅ OPTION #2: sort matches like a chat list
-   * - Scheduled first, played/cancelled last
-   * - Scheduled:
-   *    - with chat: lastMessageAt DESC
-   *    - no chat: startDateTime ASC
-   */
   const sortedMatches = useMemo(() => {
     const copy = [...matches];
 
     copy.sort((a, b) => {
       const aArchived = isArchivedStatus(a.status);
       const bArchived = isArchivedStatus(b.status);
-      if (aArchived !== bArchived) return aArchived ? 1 : -1; // archived to bottom
+      if (aArchived !== bArchived) return aArchived ? 1 : -1;
 
       const aHasChat = tsToMs(a.lastMessageAt) > 0;
       const bHasChat = tsToMs(b.lastMessageAt) > 0;
-      if (aHasChat !== bHasChat) return aHasChat ? -1 : 1; // chat threads on top
+      if (aHasChat !== bHasChat) return aHasChat ? -1 : 1;
 
       if (aHasChat && bHasChat) {
         const aLm = tsToMs(a.lastMessageAt);
         const bLm = tsToMs(b.lastMessageAt);
-        if (aLm !== bLm) return bLm - aLm; // most recent chat first
-        // tie-breaker: earlier start first
+        if (aLm !== bLm) return bLm - aLm;
         return tsToMs(a.startDateTime) - tsToMs(b.startDateTime);
       }
 
-      // no chat: upcoming soonest first
       const aStart = tsToMs(a.startDateTime);
       const bStart = tsToMs(b.startDateTime);
       if (aStart !== bStart) return aStart - bStart;
@@ -391,7 +404,6 @@ export default function MatchesScreen() {
         ? `Starts in ${formatCountdown(msUntilStart)}`
         : "In progress / started";
 
-    // ✅ Unread MESSAGE COUNT (seq-based when available)
     const read = lastReadByMatchId[item.id];
     const lastSeq = typeof item.lastMessageSeq === "number" ? item.lastMessageSeq : null;
     const readSeq = typeof read?.lastReadSeq === "number" ? read.lastReadSeq : null;
@@ -403,10 +415,8 @@ export default function MatchesScreen() {
 
     if (item.lastMessageSenderId !== user?.uid) {
       if (lastSeq != null && lastSeq > 0) {
-        // treat missing readSeq as 0 (never opened => all messages unread)
         unreadCount = Math.max(0, lastSeq - (readSeq ?? 0));
       } else if (!!lastMsgAt) {
-        // legacy fallback
         const unreadLegacy = !lastReadAt || lastReadAt.getTime() < lastMsgAt.getTime();
         unreadCount = unreadLegacy ? 1 : 0;
       }
@@ -417,7 +427,6 @@ export default function MatchesScreen() {
     const previewText = (item.lastMessageText ?? "").trim();
     const senderLabel =
       item.lastMessageSenderId === user?.uid ? "You" : item.lastMessageSenderName ?? "Someone";
-
     const previewTime = formatPreviewTimeFromDate(lastMsgAt);
 
     return (
@@ -461,7 +470,6 @@ export default function MatchesScreen() {
           </Text>
         )}
 
-        {/* Chat preview */}
         {previewText ? (
           <View style={styles.chatRow}>
             <Text style={styles.chatPreview} numberOfLines={1}>
@@ -500,7 +508,7 @@ export default function MatchesScreen() {
     );
   }
 
-  if (!teamId) {
+  if (!teamId || !activeMembership) {
     return (
       <View style={styles.container}>
         <Text style={styles.noTeamTitle}>You’re not on a team yet.</Text>

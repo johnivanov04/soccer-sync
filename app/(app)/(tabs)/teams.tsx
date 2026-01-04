@@ -1,24 +1,20 @@
 // app/(app)/(tabs)/teams.tsx
-import {
-  collection,
-  doc,
-  onSnapshot,
-  query,
-  where
-} from "firebase/firestore";
+import { collection, doc, query, where, type DocumentData, type QueryDocumentSnapshot, } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import React, { useEffect, useMemo, useState } from "react";
 import { Alert, Button, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db, functions } from "../../../src/firebaseConfig";
+import { onSnapshotSafe } from "../../../src/firestoreSafe";
 
+type QDoc = QueryDocumentSnapshot<DocumentData>;
 type Team = {
   id: string;
   name?: string;
   homeCity?: string;
   defaultMaxPlayers?: number;
-  inviteCode?: string; // ✅ new (rotatable)
+  inviteCode?: string; // rotatable
   createdBy?: string;
 };
 
@@ -51,7 +47,6 @@ function prettyFnError(e: any) {
   const msg = String(e?.message ?? e ?? "");
   const code = String(e?.code ?? "");
 
-  // firebase functions errors often look like: "functions/failed-precondition"
   if (code.includes("failed-precondition") || msg.toLowerCase().includes("failed-precondition")) {
     return "That action isn’t allowed right now (likely already in a team / owner cannot leave).";
   }
@@ -70,6 +65,9 @@ export default function TeamsScreen() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
+  // ✅ suppress team/members/pending listeners immediately when leaving
+  const [suppressTeamListeners, setSuppressTeamListeners] = useState(false);
+
   // Join
   const [joinCode, setJoinCode] = useState("");
 
@@ -83,12 +81,15 @@ export default function TeamsScreen() {
   const [members, setMembers] = useState<Membership[]>([]);
   const [pendingRequests, setPendingRequests] = useState<Membership[]>([]);
 
-  const activeMembership = useMemo(
+  const activeMembershipRaw = useMemo(
     () => myMemberships.find((m) => m.status === "active") ?? null,
     [myMemberships]
   );
+
+  // ✅ If suppressed, pretend we have no active membership
+  const activeMembership = suppressTeamListeners ? null : activeMembershipRaw;
+
   const pendingMembership = useMemo(() => {
-    // if multiple pending, just pick first
     return myMemberships.find((m) => m.status === "pending") ?? null;
   }, [myMemberships]);
 
@@ -117,16 +118,23 @@ export default function TeamsScreen() {
     }
 
     const qMine = query(collection(db, "memberships"), where("userId", "==", user.uid));
-    const unsub = onSnapshot(
+    const unsub = onSnapshotSafe(
       qMine,
       (snap) => {
-        const list: Membership[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+        const list: Membership[] = snap.docs.map((d: QDoc) => ({ id: d.id, ...(d.data() as any) }));
         setMyMemberships(list);
         setLoading(false);
+
+        // ✅ once there is no active membership, let listeners run normally again
+        const stillActive = list.some((m) => m.status === "active");
+        if (!stillActive) setSuppressTeamListeners(false);
       },
-      (err) => {
-        console.warn("memberships(userId) listener failed:", err);
-        setLoading(false);
+      {
+        label: "teams:memberships(userId)",
+        onError: (err) => {
+          console.warn("memberships(userId) listener failed:", err);
+          setLoading(false);
+        },
       }
     );
 
@@ -135,13 +143,15 @@ export default function TeamsScreen() {
 
   // 2) Load team doc when I’m active in a team
   useEffect(() => {
-    if (!activeMembership?.teamId) {
+    const teamId = activeMembership?.teamId ?? null;
+
+    if (!teamId) {
       setTeam(null);
       return;
     }
 
-    const teamRef = doc(db, "teams", activeMembership.teamId);
-    const unsub = onSnapshot(
+    const teamRef = doc(db, "teams", teamId);
+    const unsub = onSnapshotSafe(
       teamRef,
       (snap) => {
         if (!snap.exists()) {
@@ -150,7 +160,14 @@ export default function TeamsScreen() {
         }
         setTeam({ id: snap.id, ...(snap.data() as any) });
       },
-      (err) => console.warn("team listener failed:", err)
+      {
+        label: "teams:teamDoc",
+        onPermissionDenied: () => setTeam(null),
+        onError: (err) => {
+          console.warn("team listener failed:", err);
+          setTeam(null);
+        },
+      }
     );
 
     return () => unsub();
@@ -158,7 +175,8 @@ export default function TeamsScreen() {
 
   // 3) Members list (active members) for this team
   useEffect(() => {
-    const teamId = activeMembership?.teamId;
+    const teamId = activeMembership?.teamId ?? null;
+
     if (!teamId) {
       setMembers([]);
       return;
@@ -170,13 +188,20 @@ export default function TeamsScreen() {
       where("status", "==", "active")
     );
 
-    const unsub = onSnapshot(
+    const unsub = onSnapshotSafe(
       qMembers,
       (snap) => {
-        const list: Membership[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+        const list: Membership[] = snap.docs.map((d: QDoc) => ({ id: d.id, ...(d.data() as any) }));
         setMembers(list);
       },
-      (err) => console.warn("members list listener failed:", err)
+      {
+        label: "teams:members(active)",
+        onPermissionDenied: () => setMembers([]),
+        onError: (err) => {
+          console.warn("members list listener failed:", err);
+          setMembers([]);
+        },
+      }
     );
 
     return () => unsub();
@@ -184,7 +209,8 @@ export default function TeamsScreen() {
 
   // 4) Pending join requests (admins only)
   useEffect(() => {
-    const teamId = activeMembership?.teamId;
+    const teamId = activeMembership?.teamId ?? null;
+
     if (!teamId || !isAdmin) {
       setPendingRequests([]);
       return;
@@ -196,13 +222,20 @@ export default function TeamsScreen() {
       where("status", "==", "pending")
     );
 
-    const unsub = onSnapshot(
+    const unsub = onSnapshotSafe(
       qPending,
       (snap) => {
-        const list: Membership[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+        const list: Membership[] = snap.docs.map((d: QDoc) => ({ id: d.id, ...(d.data() as any) }));
         setPendingRequests(list);
       },
-      (err) => console.warn("pending list listener failed:", err)
+      {
+        label: "teams:pending",
+        onPermissionDenied: () => setPendingRequests([]),
+        onError: (err) => {
+          console.warn("pending list listener failed:", err);
+          setPendingRequests([]);
+        },
+      }
     );
 
     return () => unsub();
@@ -211,12 +244,15 @@ export default function TeamsScreen() {
   const handleJoinTeam = async () => {
     if (!user?.uid) return;
 
-    if (activeMembership) {
+    if (activeMembershipRaw) {
       Alert.alert("Already in a team", "Leave your current team before joining another.");
       return;
     }
     if (pendingMembership) {
-      Alert.alert("Request pending", "You already have a pending request. Cancel it first if you want to join a different team.");
+      Alert.alert(
+        "Request pending",
+        "You already have a pending request. Cancel it first if you want to join a different team."
+      );
       return;
     }
 
@@ -237,12 +273,15 @@ export default function TeamsScreen() {
       setJoinCode("");
 
       if (data?.status === "pending") {
-        Alert.alert("Request sent", `Waiting for approval to join ${data?.teamName ?? data?.teamId ?? "the team"}.`);
+        Alert.alert(
+          "Request sent",
+          `Waiting for approval to join ${data?.teamName ?? data?.teamId ?? "the team"}.`
+        );
       } else {
         Alert.alert("Joined", "You’re in!");
       }
     } catch (e) {
-      console.error("joinTeamWithCode failed:", e);
+      console.warn("joinTeamWithCode failed:", e);
       Alert.alert("Error", prettyFnError(e));
     } finally {
       setSaving(false);
@@ -252,7 +291,7 @@ export default function TeamsScreen() {
   const handleCreateTeam = async () => {
     if (!user?.uid) return;
 
-    if (activeMembership) {
+    if (activeMembershipRaw) {
       Alert.alert("Already in a team", "Leave your current team before creating a new one.");
       return;
     }
@@ -283,9 +322,12 @@ export default function TeamsScreen() {
       const data = res?.data ?? {};
       setNewTeamName("");
       setNewTeamCode("");
-      Alert.alert("Team created", `Created ${data?.teamName ?? name}.\nInvite code: ${data?.inviteCode ?? code}`);
+      Alert.alert(
+        "Team created",
+        `Created ${data?.teamName ?? name}.\nInvite code: ${data?.inviteCode ?? code}`
+      );
     } catch (e) {
-      console.error("createTeam failed:", e);
+      console.warn("createTeam failed:", e);
       Alert.alert("Error", prettyFnError(e));
     } finally {
       setSaving(false);
@@ -293,7 +335,8 @@ export default function TeamsScreen() {
   };
 
   const handleLeaveTeam = async () => {
-    if (!activeMembership?.teamId) return;
+    const teamId = activeMembershipRaw?.teamId;
+    if (!teamId) return;
 
     Alert.alert("Leave team?", "You’ll lose access to team matches/chats.", [
       { text: "Cancel", style: "cancel" },
@@ -302,10 +345,19 @@ export default function TeamsScreen() {
         style: "destructive",
         onPress: async () => {
           setSaving(true);
+
+          // ✅ stop listeners *before* permissions flip
+          setSuppressTeamListeners(true);
+          setTeam(null);
+          setMembers([]);
+          setPendingRequests([]);
+
           try {
             await fnLeaveTeam({});
           } catch (e) {
-            console.error("leaveTeam failed:", e);
+            // if leave fails (e.g. owner), re-enable
+            setSuppressTeamListeners(false);
+            console.warn("leaveTeam failed:", e);
             Alert.alert("Error", prettyFnError(e));
           } finally {
             setSaving(false);
@@ -322,7 +374,7 @@ export default function TeamsScreen() {
     try {
       await fnCancelMyPending({ teamId: pendingMembership.teamId });
     } catch (e) {
-      console.error("cancelMyPendingMembership failed:", e);
+      console.warn("cancelMyPendingMembership failed:", e);
       Alert.alert("Error", prettyFnError(e));
     } finally {
       setSaving(false);
@@ -330,12 +382,12 @@ export default function TeamsScreen() {
   };
 
   const handleApprove = async (uid: string) => {
-    if (!activeMembership?.teamId) return;
+    if (!activeMembershipRaw?.teamId) return;
     setSaving(true);
     try {
-      await fnApproveMembership({ teamId: activeMembership.teamId, userId: uid });
+      await fnApproveMembership({ teamId: activeMembershipRaw.teamId, userId: uid });
     } catch (e) {
-      console.error("approveMembership failed:", e);
+      console.warn("approveMembership failed:", e);
       Alert.alert("Error", prettyFnError(e));
     } finally {
       setSaving(false);
@@ -343,12 +395,12 @@ export default function TeamsScreen() {
   };
 
   const handleDeny = async (uid: string) => {
-    if (!activeMembership?.teamId) return;
+    if (!activeMembershipRaw?.teamId) return;
     setSaving(true);
     try {
-      await fnDenyMembership({ teamId: activeMembership.teamId, userId: uid });
+      await fnDenyMembership({ teamId: activeMembershipRaw.teamId, userId: uid });
     } catch (e) {
-      console.error("denyMembership failed:", e);
+      console.warn("denyMembership failed:", e);
       Alert.alert("Error", prettyFnError(e));
     } finally {
       setSaving(false);
@@ -356,7 +408,7 @@ export default function TeamsScreen() {
   };
 
   const handleKick = async (uid: string) => {
-    if (!activeMembership?.teamId) return;
+    if (!activeMembershipRaw?.teamId) return;
     Alert.alert("Remove member?", "They’ll be removed from the team.", [
       { text: "Cancel", style: "cancel" },
       {
@@ -365,9 +417,9 @@ export default function TeamsScreen() {
         onPress: async () => {
           setSaving(true);
           try {
-            await fnKickMember({ teamId: activeMembership.teamId, userId: uid });
+            await fnKickMember({ teamId: activeMembershipRaw.teamId, userId: uid });
           } catch (e) {
-            console.error("kickMember failed:", e);
+            console.warn("kickMember failed:", e);
             Alert.alert("Error", prettyFnError(e));
           } finally {
             setSaving(false);
@@ -378,14 +430,14 @@ export default function TeamsScreen() {
   };
 
   const handleRotateInvite = async () => {
-    if (!activeMembership?.teamId) return;
+    if (!activeMembershipRaw?.teamId) return;
     setSaving(true);
     try {
-      const res: any = await fnRotateInviteCode({ teamId: activeMembership.teamId });
+      const res: any = await fnRotateInviteCode({ teamId: activeMembershipRaw.teamId });
       const data = res?.data ?? {};
       Alert.alert("Invite code rotated", `New invite code: ${data?.inviteCode ?? ""}`);
     } catch (e) {
-      console.error("rotateInviteCode failed:", e);
+      console.warn("rotateInviteCode failed:", e);
       Alert.alert("Error", prettyFnError(e));
     } finally {
       setSaving(false);
@@ -478,14 +530,17 @@ export default function TeamsScreen() {
                   <Text style={{ fontWeight: "700" }}>
                     {r.userDisplayName ?? r.userEmail ?? r.userId}
                   </Text>
-                  <Text style={{ color: "#666", marginTop: 2 }}>
-                    {r.userEmail ?? r.userId}
-                  </Text>
+                  <Text style={{ color: "#666", marginTop: 2 }}>{r.userEmail ?? r.userId}</Text>
                 </View>
 
                 <View style={{ gap: 8 }}>
                   <Button title="Approve" onPress={() => handleApprove(r.userId)} disabled={saving} />
-                  <Button title="Deny" onPress={() => handleDeny(r.userId)} disabled={saving} color="#d11" />
+                  <Button
+                    title="Deny"
+                    onPress={() => handleDeny(r.userId)}
+                    disabled={saving}
+                    color="#d11"
+                  />
                 </View>
               </View>
             ))}
@@ -499,20 +554,23 @@ export default function TeamsScreen() {
 
             {members.map((m) => {
               const isMe = m.userId === user.uid;
-              const canKick = isAdmin && !isMe && m.role !== "owner"; // keep it simple
+              const canKick = isAdmin && !isMe && m.role !== "owner";
               return (
                 <View key={m.id} style={styles.rowCard}>
                   <View style={{ flex: 1 }}>
                     <Text style={{ fontWeight: "700" }}>
                       {m.userDisplayName ?? m.userEmail ?? m.userId} {isMe ? "(you)" : ""}
                     </Text>
-                    <Text style={{ color: "#666", marginTop: 2 }}>
-                      {m.role}
-                    </Text>
+                    <Text style={{ color: "#666", marginTop: 2 }}>{m.role}</Text>
                   </View>
 
                   {canKick ? (
-                    <Button title="Remove" color="#d11" onPress={() => handleKick(m.userId)} disabled={saving} />
+                    <Button
+                      title="Remove"
+                      color="#d11"
+                      onPress={() => handleKick(m.userId)}
+                      disabled={saving}
+                    />
                   ) : null}
                 </View>
               );
@@ -521,7 +579,7 @@ export default function TeamsScreen() {
         )}
 
         {/* Join (only if not active/pending) */}
-        {!activeMembership && !pendingMembership && (
+        {!activeMembershipRaw && !pendingMembership && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Join by team code</Text>
             <TextInput
@@ -532,16 +590,12 @@ export default function TeamsScreen() {
               autoCapitalize="none"
               editable={!saving}
             />
-            <Button
-              title={saving ? "Working..." : "Request to join"}
-              onPress={handleJoinTeam}
-              disabled={saving}
-            />
+            <Button title={saving ? "Working..." : "Request to join"} onPress={handleJoinTeam} disabled={saving} />
           </View>
         )}
 
         {/* Create (only if not active/pending) */}
-        {!activeMembership && !pendingMembership && (
+        {!activeMembershipRaw && !pendingMembership && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Create a new team</Text>
 
@@ -565,11 +619,7 @@ export default function TeamsScreen() {
             />
             <Text style={styles.helper}>3–24 chars, lowercase letters/numbers/hyphens only.</Text>
 
-            <Button
-              title={saving ? "Working..." : "Create team"}
-              onPress={handleCreateTeam}
-              disabled={saving}
-            />
+            <Button title={saving ? "Working..." : "Create team"} onPress={handleCreateTeam} disabled={saving} />
           </View>
         )}
 

@@ -8,12 +8,13 @@ import {
   doc,
   getDoc,
   limit,
-  onSnapshot,
   orderBy,
   query,
   serverTimestamp,
   setDoc,
   where,
+  type DocumentData,
+  type QueryDocumentSnapshot,
 } from "firebase/firestore";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -31,7 +32,9 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../../../../src/context/AuthContext";
 import { db } from "../../../../src/firebaseConfig";
+import { onSnapshotSafe } from "../../../../src/firestoreSafe";
 
+type QDoc = QueryDocumentSnapshot<DocumentData>;
 type ChatMessage = {
   id: string;
   matchId: string;
@@ -143,7 +146,6 @@ export default function MatchChatScreen() {
     try {
       const ref = doc(db, "users", user.uid, "chatReads", matchIdStr);
 
-      // ✅ merge:true so we don't wipe other fields (and future-proof)
       await setDoc(
         ref,
         {
@@ -173,7 +175,6 @@ export default function MatchChatScreen() {
     };
   }, []);
 
-  // When screen is opened/focused, mark read
   useFocusEffect(
     useCallback(() => {
       scheduleMarkChatRead();
@@ -181,7 +182,6 @@ export default function MatchChatScreen() {
     }, [scheduleMarkChatRead])
   );
 
-  // Mark read when app returns to foreground
   useEffect(() => {
     const sub = AppState.addEventListener("change", (state) => {
       if (state === "active") scheduleMarkChatRead();
@@ -199,7 +199,7 @@ export default function MatchChatScreen() {
     }
 
     const matchRef = doc(db, "matches", matchIdStr);
-    const unsub = onSnapshot(
+    const unsub = onSnapshotSafe(
       matchRef,
       (snap) => {
         if (!snap.exists()) {
@@ -217,18 +217,25 @@ export default function MatchChatScreen() {
 
         setLoading(false);
       },
-      (err) => {
-        console.error("match doc listener error:", err);
-        setMatchTeamId(null);
-        setLastMessageSeq(0);
-        setLoading(false);
+      {
+        label: "chat:matchDoc",
+        onPermissionDenied: () => {
+          setMatchTeamId(null);
+          setLastMessageSeq(0);
+          setLoading(false);
+        },
+        onError: (err) => {
+          console.error("match doc listener error:", err);
+          setMatchTeamId(null);
+          setLastMessageSeq(0);
+          setLoading(false);
+        },
       }
     );
 
     return () => unsub();
   }, [matchIdStr]);
 
-  // When seq updates while you're in the chat (new message), mark read again
   useEffect(() => {
     if (!matchIdStr) return;
     scheduleMarkChatRead();
@@ -242,13 +249,17 @@ export default function MatchChatScreen() {
     }
 
     const prefRef = doc(db, "users", user.uid, "chatPrefs", matchIdStr);
-    const unsub = onSnapshot(
+    const unsub = onSnapshotSafe(
       prefRef,
       (snap) => {
         const d = snap.data() as any;
         setMuted(d?.muted === true);
       },
-      () => setMuted(false)
+      {
+        label: "chat:mutePref",
+        onError: () => setMuted(false),
+        onPermissionDenied: () => setMuted(false),
+      }
     );
 
     return () => unsub();
@@ -279,7 +290,6 @@ export default function MatchChatScreen() {
           : "You’ll get push notifications again for this match chat."
       );
 
-      // feels right after a settings tap
       scheduleMarkChatRead();
     } catch (e) {
       console.warn("toggleMute failed:", e);
@@ -294,20 +304,20 @@ export default function MatchChatScreen() {
     if (!matchIdStr) return;
 
     const colRef = collection(db, "matchMessages");
-    const q = query(
+    const qy = query(
       colRef,
       where("matchId", "==", matchIdStr),
       orderBy("createdAt", "desc"),
       limit(200)
     );
 
-    const unsub = onSnapshot(
-      q,
+    const unsub = onSnapshotSafe(
+      qy,
       (snap) => {
         const stableMap = stableMsByIdRef.current;
         const nextIds = new Set<string>();
 
-        const list: ChatMessage[] = snap.docs.map((d) => {
+        const list: ChatMessage[] = snap.docs.map((d: QDoc) => {
           const data = d.data({ serverTimestamps: "estimate" }) as any;
 
           const id = d.id;
@@ -331,12 +341,10 @@ export default function MatchChatScreen() {
           };
         });
 
-        // keep stableMap from growing without bound
         for (const k of stableMap.keys()) {
           if (!nextIds.has(k)) stableMap.delete(k);
         }
 
-        // oldest -> newest
         list.sort((a, b) => {
           const dt = a.stableMs - b.stableMs;
           if (dt !== 0) return dt;
@@ -345,7 +353,11 @@ export default function MatchChatScreen() {
 
         setMessages(list);
       },
-      (err) => console.error("Chat listener error:", err)
+      {
+        label: "chat:messages",
+        onPermissionDenied: () => setMessages([]),
+        onError: (err) => console.error("Chat listener error:", err),
+      }
     );
 
     return () => unsub();
@@ -564,9 +576,7 @@ export default function MatchChatScreen() {
                   )}
 
                   <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleOther]}>
-                    {!mine && showMeta && (
-                      <Text style={styles.bubbleName}>{item.displayName}</Text>
-                    )}
+                    {!mine && showMeta && <Text style={styles.bubbleName}>{item.displayName}</Text>}
 
                     <Text style={styles.bubbleText}>{item.text}</Text>
 

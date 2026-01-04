@@ -1,27 +1,22 @@
 // app/(app)/(tabs)/myRsvps.tsx
 import { useRouter } from "expo-router";
-import {
-    collection,
-    doc,
-    onSnapshot,
-    query,
-    where,
-} from "firebase/firestore";
+import { collection, doc, query, where, type DocumentData, type QueryDocumentSnapshot } from "firebase/firestore";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
-    ActivityIndicator,
-    SectionList,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
+  ActivityIndicator,
+  SectionList,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from "react-native";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
+import { onSnapshotSafe } from "../../../src/firestoreSafe";
 
 const RSVP_STATUSES = ["yes", "maybe", "no"] as const;
 type RsvpStatus = (typeof RSVP_STATUSES)[number];
-
+type QDoc = QueryDocumentSnapshot<DocumentData>;
 type MatchStatus = "scheduled" | "played" | "cancelled" | string;
 
 type Match = {
@@ -111,13 +106,13 @@ export default function MyRsvpsScreen() {
     setLoading(true);
     setErrorText(null);
 
-    const q = query(collection(db, "rsvps"), where("userId", "==", user.uid));
+    const qy = query(collection(db, "rsvps"), where("userId", "==", user.uid));
 
-    const unsub = onSnapshot(
-      q,
+    const unsub = onSnapshotSafe(
+      qy,
       (snapshot) => {
         const list: MyRsvp[] = snapshot.docs
-          .map((d) => {
+          .map((d: QDoc) => {
             const data = d.data() as any;
             return {
               id: d.id,
@@ -129,16 +124,24 @@ export default function MyRsvpsScreen() {
               updatedAt: data.updatedAt,
             };
           })
-          .filter((r) => !!r.matchId && r.userId === user.uid);
+          .filter((r: MyRsvp) => !!r.matchId && r.userId === user.uid);
 
         setRsvps(list);
         setLoading(false);
       },
-      (err) => {
-        console.error("My RSVPs subscription error", err);
-        setErrorText("Could not load your RSVPs (permissions).");
-        setRsvps([]);
-        setLoading(false);
+      {
+        label: "myRsvps:rsvps(userId)",
+        onError: (err) => {
+          console.error("My RSVPs subscription error", err);
+          setErrorText("Could not load your RSVPs (permissions).");
+          setRsvps([]);
+          setLoading(false);
+        },
+        onPermissionDenied: () => {
+          setErrorText("Could not load your RSVPs (permissions).");
+          setRsvps([]);
+          setLoading(false);
+        },
       }
     );
 
@@ -154,7 +157,7 @@ export default function MyRsvpsScreen() {
 
   const matchIdsKey = useMemo(() => matchIds.join("|"), [matchIds]);
 
-  // 2) Subscribe to each match doc individually (avoids "in" query being denied by one bad id)
+  // 2) Subscribe to each match doc individually
   const matchUnsubsRef = useRef<Record<string, () => void>>({});
 
   useEffect(() => {
@@ -181,7 +184,7 @@ export default function MyRsvpsScreen() {
     matchIds.forEach((id) => {
       const matchRef = doc(db, "matches", id);
 
-      const unsub = onSnapshot(
+      const unsub = onSnapshotSafe(
         matchRef,
         (snap) => {
           setMatchesById((prev) => {
@@ -191,10 +194,16 @@ export default function MyRsvpsScreen() {
             return next;
           });
         },
-        (err) => {
-          // If this specific match is not readable, don't kill the whole screen
-          console.error("My RSVPs match doc listener error", id, err);
-          setMatchesById((prev) => ({ ...prev, [id]: null }));
+        {
+          label: `myRsvps:matchDoc(${id})`,
+          onPermissionDenied: () => {
+            setMatchesById((prev) => ({ ...prev, [id]: null }));
+          },
+          onError: (err) => {
+            // don't kill whole screen
+            console.error("My RSVPs match doc listener error", id, err);
+            setMatchesById((prev) => ({ ...prev, [id]: null }));
+          },
         }
       );
 
@@ -308,7 +317,6 @@ export default function MyRsvpsScreen() {
           const waitlist = match?.waitlistCount ?? 0;
 
           const isHost = !!match?.createdBy && match.createdBy === user.uid;
-
           const canOpen = !!match;
 
           return (
