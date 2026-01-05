@@ -15,21 +15,19 @@ import {
 } from "react-native";
 
 import { updateProfile } from "firebase/auth";
-import {
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  query,
-  serverTimestamp,
-  setDoc,
-  where,
-  writeBatch,
-} from "firebase/firestore";
+import { doc, onSnapshot, serverTimestamp, setDoc } from "firebase/firestore";
 import { deleteObject, getDownloadURL, ref, uploadBytes } from "firebase/storage";
 
 import { useAuth } from "../../../src/context/AuthContext";
-import { auth, db, storage } from "../../../src/firebaseConfig";
+import { db, storage } from "../../../src/firebaseConfig";
+
+type UserDoc = {
+  displayName?: string;
+  teamId?: string | null;
+  photoURL?: string | null;
+  photoPath?: string | null;
+  updatedAt?: any;
+};
 
 export default function ProfileScreen() {
   const { user, signOut } = useAuth();
@@ -56,43 +54,42 @@ export default function ProfileScreen() {
     return (first + last).toUpperCase();
   }, [displayName, user?.displayName, user?.email]);
 
+  // ✅ Live subscribe to user doc so photo/name updates show immediately
   useEffect(() => {
     if (!user?.uid) return;
 
-    const loadProfile = async () => {
-      try {
-        const userRef = doc(db, "users", user.uid);
-        const snap = await getDoc(userRef);
+    const userRef = doc(db, "users", user.uid);
 
-        if (snap.exists()) {
-          const data = snap.data() as any;
+    const unsub = onSnapshot(
+      userRef,
+      (snap) => {
+        const data = (snap.exists() ? (snap.data() as UserDoc) : null) ?? null;
 
-          setDisplayName(
-            (data.displayName as string) || user.email?.split("@")[0] || ""
-          );
+        const name =
+          (data?.displayName as string) ||
+          user.displayName ||
+          user.email?.split("@")[0] ||
+          "";
 
-          setTeamId(data.teamId ?? null);
+        setDisplayName(name);
+        setTeamId((data?.teamId as string) ?? null);
 
-          const url = (data.photoURL as string) ?? user.photoURL ?? null;
-          setPhotoURL(url);
+        const url = (data?.photoURL as string) ?? user.photoURL ?? null;
+        setPhotoURL(url);
 
-          const path = (data.photoPath as string) ?? null;
-          setPhotoPath(path);
-        } else {
-          setDisplayName(user.email?.split("@")[0] ?? "");
-          setTeamId(null);
-          setPhotoURL(user.photoURL ?? null);
-          setPhotoPath(null);
-        }
-      } catch (err) {
-        console.error("Error loading profile", err);
+        const path = (data?.photoPath as string) ?? null;
+        setPhotoPath(path);
+
+        setLoading(false);
+      },
+      (err) => {
+        console.error("Error listening to profile", err);
         Alert.alert("Error", "Could not load your profile.");
-      } finally {
         setLoading(false);
       }
-    };
+    );
 
-    loadProfile();
+    return () => unsub();
   }, [user?.uid]);
 
   const handleSave = async () => {
@@ -117,9 +114,9 @@ export default function ProfileScreen() {
         { merge: true }
       );
 
+      // Optional: keep Firebase Auth displayName in sync
       try {
-        const current = auth.currentUser;
-        if (current) await updateProfile(current, { displayName: trimmed });
+        await updateProfile(user, { displayName: trimmed });
       } catch (e) {
         console.warn("Could not update auth displayName", e);
       }
@@ -133,40 +130,7 @@ export default function ProfileScreen() {
     }
   };
 
-  // ✅ Option B: after a profile pic change, update all existing RSVP docs for this user
-  const backfillRsvpPhotoURL = async (newUrl: string) => {
-    if (!user?.uid) return 0;
-
-    const rsvpsCol = collection(db, "rsvps");
-    const q1 = query(rsvpsCol, where("userId", "==", user.uid));
-    const snap = await getDocs(q1);
-
-    if (snap.empty) return 0;
-
-    const docs = snap.docs;
-
-    // Firestore batches are limited (500 ops). Use chunks to be safe.
-    const CHUNK = 450;
-    let updated = 0;
-
-    for (let i = 0; i < docs.length; i += CHUNK) {
-      const batch = writeBatch(db);
-      const slice = docs.slice(i, i + CHUNK);
-
-      for (const d of slice) {
-        batch.update(d.ref, {
-          photoURL: newUrl,
-          updatedAt: serverTimestamp(),
-        });
-      }
-
-      await batch.commit();
-      updated += slice.length;
-    }
-
-    return updated;
-  };
-
+  // ✅ Option A: upload -> Storage, save URL on users/{uid}, render everywhere from user doc
   const handlePickPhoto = async () => {
     if (!user?.uid) return;
 
@@ -183,7 +147,7 @@ export default function ProfileScreen() {
       }
 
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images, // ✅ new API (no deprecation warning)
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
         allowsEditing: true,
         aspect: [1, 1],
         quality: 0.85,
@@ -194,11 +158,11 @@ export default function ProfileScreen() {
       const asset = result.assets?.[0];
       if (!asset?.uri) return;
 
-      const response = await fetch(asset.uri);
-      const blob = await response.blob();
+      const resp = await fetch(asset.uri);
+      const blob = await resp.blob();
 
-      const fileName = `${Date.now()}.jpg`;
-      const newPath = `avatars/${user.uid}/${fileName}`;
+      // Keep it deterministic so latest always wins (simpler caching + cleanup)
+      const newPath = `avatars/${user.uid}/avatar.jpg`;
       const storageRef = ref(storage, newPath);
 
       await uploadBytes(storageRef, blob, {
@@ -207,7 +171,7 @@ export default function ProfileScreen() {
 
       const url = await getDownloadURL(storageRef);
 
-      // Save to Firestore user doc
+      // Save to Firestore user doc (source of truth)
       const userRef = doc(db, "users", user.uid);
       await setDoc(
         userRef,
@@ -219,28 +183,15 @@ export default function ProfileScreen() {
         { merge: true }
       );
 
-      // Update Firebase Auth profile too (optional)
+      // Optional: also update Firebase Auth profile
       try {
-        const current = auth.currentUser;
-        if (current) await updateProfile(current, { photoURL: url });
+        await updateProfile(user, { photoURL: url });
       } catch (e) {
         console.warn("Could not update auth photoURL", e);
       }
 
-      // ✅ Backfill existing RSVP docs so matches you already RSVPed for start showing your new photo
-      try {
-        const n = await backfillRsvpPhotoURL(url);
-        console.log(`✅ Backfilled photoURL on ${n} RSVP docs`);
-      } catch (e) {
-        // If this fails, it’s almost always Firestore rules not allowing RSVP photoURL updates
-        console.warn("⚠️ RSVP backfill failed (photo still updated):", e);
-        Alert.alert(
-          "Photo updated",
-          "Your profile picture was updated, but older RSVPs couldn't be updated. If photos don't show everywhere, we may need to tweak Firestore rules for RSVP photo updates."
-        );
-      }
-
-      // Attempt to delete old photo (optional cleanup)
+      // Optional cleanup: if you ever change strategy to non-deterministic paths,
+      // this block would delete the old one. With avatar.jpg it won't run.
       if (photoPath && photoPath !== newPath) {
         try {
           await deleteObject(ref(storage, photoPath));
@@ -254,21 +205,7 @@ export default function ProfileScreen() {
 
       Alert.alert("Updated", "Your profile picture has been updated.");
     } catch (err: any) {
-      console.error("Photo upload failed (raw):", err);
-      try {
-        console.error(
-          "err props:",
-          JSON.stringify(err, Object.getOwnPropertyNames(err), 2)
-        );
-      } catch (e) {
-        console.warn("Could not stringify error props", e);
-      }
-
-      console.error("code:", err?.code);
-      console.error("message:", err?.message);
-      console.error("serverResponse:", err?.serverResponse);
-      console.error("customData:", err?.customData);
-
+      console.error("Photo upload failed:", err);
       Alert.alert(
         "Upload failed",
         err?.message ?? "Could not update profile picture. Try again."

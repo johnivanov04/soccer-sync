@@ -1,4 +1,7 @@
 // src/context/AuthContext.tsx
+import React, { createContext, useContext, useEffect, useRef, useState } from "react";
+import { Platform } from "react-native";
+
 import {
   createUserWithEmailAndPassword,
   signOut as fbSignOut,
@@ -7,14 +10,9 @@ import {
   updateProfile,
   User,
 } from "firebase/auth";
-import {
-  arrayUnion,
-  doc,
-  serverTimestamp,
-  setDoc,
-} from "firebase/firestore";
-import React, { createContext, useContext, useEffect, useRef, useState } from "react";
-import { Platform } from "react-native";
+
+import { arrayUnion, doc, serverTimestamp, setDoc } from "firebase/firestore";
+
 import { auth, db } from "../firebaseConfig";
 import { registerForPushNotificationsAsync } from "../utils/pushNotifications";
 
@@ -40,25 +38,24 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       setUser(fbUser);
       setInitializing(false);
 
-      // Reset guard on logout
       if (!fbUser?.uid) {
         pushSetupDoneForUidRef.current = null;
         return;
       }
 
-      // Only once per login session per uid
       if (pushSetupDoneForUidRef.current === fbUser.uid) return;
       pushSetupDoneForUidRef.current = fbUser.uid;
 
       const userRef = doc(db, "users", fbUser.uid);
 
-      // Ensure /users/{uid} exists (helps for older accounts)
+      // Ensure /users/{uid} exists
       try {
         await setDoc(
           userRef,
           {
             email: fbUser.email ?? "",
             ...(fbUser.displayName ? { displayName: fbUser.displayName } : {}),
+            ...(fbUser.photoURL ? { photoURL: fbUser.photoURL } : {}),
             updatedAt: serverTimestamp(),
           },
           { merge: true }
@@ -72,13 +69,10 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         const expoPushToken = await registerForPushNotificationsAsync();
         if (!expoPushToken) return;
 
-        // Store BOTH:
-        // - expoPushToken (latest token, for backwards compatibility)
-        // - expoPushTokens (array of all tokens ever seen for this user)
         await setDoc(
           userRef,
           {
-            expoPushToken: expoPushToken,
+            expoPushToken,
             expoPushTokens: arrayUnion(expoPushToken),
             expoPushTokenPlatform: Platform.OS,
             expoPushTokenUpdatedAt: serverTimestamp(),
@@ -98,11 +92,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   const signUp = async (email: string, password: string, displayName?: string) => {
-    // 1) Create the Auth user
     const cred = await createUserWithEmailAndPassword(auth, email, password);
     const fbUser = cred.user;
 
-    // 2) (Optional) update Firebase Auth profile with displayName
     if (displayName && displayName.trim()) {
       try {
         await updateProfile(fbUser, { displayName: displayName.trim() });
@@ -111,7 +103,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       }
     }
 
-    // 3) Create / update Firestore user doc, with NO teamId yet
     const userRef = doc(db, "users", fbUser.uid);
 
     await setDoc(
@@ -122,7 +113,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           ? { displayName: displayName.trim() }
           : {}),
         createdAt: serverTimestamp(),
-        // No teamId here — new users start teamless
       },
       { merge: true }
     );

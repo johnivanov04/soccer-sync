@@ -5,7 +5,9 @@ import {
   collection,
   deleteDoc,
   doc,
+  documentId,
   getDoc,
+  getDocs,
   onSnapshot,
   query,
   serverTimestamp,
@@ -56,10 +58,13 @@ type Rsvp = {
   status?: RsvpStatus;
   isWaitlisted?: boolean;
   updatedAt?: any;
+};
 
-  // ✅ new fields for avatars (stored on RSVP doc so teammates can read)
-  photoURL?: string | null;
-  photoVersion?: number | null;
+type UserProfileMini = {
+  uid: string;
+  photoURL: string | null;
+  displayName: string | null;
+  updatedAtMs: number | null; // used only for cache-busting
 };
 
 function toDate(raw: any): Date {
@@ -125,9 +130,9 @@ function initialsFromName(name?: string | null) {
   return (first + last).toUpperCase();
 }
 
-function avatarUri(photoURL?: string | null, photoVersion?: number | null) {
+function avatarUri(photoURL?: string | null, updatedAtMs?: number | null) {
   if (!photoURL) return null;
-  const v = Number.isFinite(photoVersion as any) ? String(photoVersion) : "0";
+  const v = Number.isFinite(updatedAtMs as any) ? String(updatedAtMs) : "0";
   return photoURL.includes("?") ? `${photoURL}&v=${v}` : `${photoURL}?v=${v}`;
 }
 
@@ -135,16 +140,16 @@ function PersonRow({
   name,
   subtitle,
   photoURL,
-  photoVersion,
+  updatedAtMs,
   highlight,
 }: {
   name: string;
   subtitle?: string;
   photoURL?: string | null;
-  photoVersion?: number | null;
+  updatedAtMs?: number | null;
   highlight?: boolean;
 }) {
-  const uri = avatarUri(photoURL, photoVersion);
+  const uri = avatarUri(photoURL, updatedAtMs);
   const initials = initialsFromName(name);
 
   return (
@@ -167,6 +172,41 @@ function PersonRow({
   );
 }
 
+async function loadUserProfilesByUids(uids: string[]) {
+  const uniq = Array.from(new Set(uids.filter(Boolean)));
+  if (uniq.length === 0) return new Map<string, UserProfileMini>();
+
+  // Firestore "in" query supports up to 10 items
+  const CHUNK = 10;
+  const out = new Map<string, UserProfileMini>();
+
+  for (let i = 0; i < uniq.length; i += CHUNK) {
+    const slice = uniq.slice(i, i + CHUNK);
+    const usersCol = collection(db, "users");
+    const q = query(usersCol, where(documentId(), "in", slice));
+    const snap = await getDocs(q);
+
+    for (const d of snap.docs) {
+      const data = d.data() as any;
+      const updatedAtMs =
+        typeof data?.updatedAt?.toMillis === "function"
+          ? data.updatedAt.toMillis()
+          : typeof data?.updatedAt?.toDate === "function"
+          ? data.updatedAt.toDate().getTime()
+          : null;
+
+      out.set(d.id, {
+        uid: d.id,
+        photoURL: (data?.photoURL as string) ?? null,
+        displayName: (data?.displayName as string) ?? null,
+        updatedAtMs: typeof updatedAtMs === "number" ? updatedAtMs : null,
+      });
+    }
+  }
+
+  return out;
+}
+
 export default function MatchDetailScreen() {
   const params = useLocalSearchParams();
   const matchIdStr = paramToString(params?.matchId);
@@ -182,11 +222,12 @@ export default function MatchDetailScreen() {
   const [exportingCalendar, setExportingCalendar] = useState(false);
   const [savingRsvp, setSavingRsvp] = useState(false);
 
-  // tick for countdown updates
   const [nowTick, setNowTick] = useState(Date.now());
 
-  // only for on-screen "you got promoted" alert
   const prevWaitlistedRef = useRef<boolean | null>(null);
+
+  // ✅ Option A: user profile map for avatars
+  const [userProfiles, setUserProfiles] = useState<Record<string, UserProfileMini>>({});
 
   useEffect(() => {
     const t = setInterval(() => setNowTick(Date.now()), 30_000);
@@ -227,11 +268,6 @@ export default function MatchDetailScreen() {
             status: data.status as RsvpStatus,
             isWaitlisted: data.isWaitlisted ?? false,
             updatedAt: data.updatedAt,
-
-            // ✅ new avatar fields (may be missing on older RSVPs)
-            photoURL: data.photoURL ?? null,
-            photoVersion:
-              typeof data.photoVersion === "number" ? data.photoVersion : null,
           };
         });
 
@@ -250,10 +286,7 @@ export default function MatchDetailScreen() {
               nowWaitlisted === false &&
               mine?.status === "yes"
             ) {
-              Alert.alert(
-                "You’re in! ✅",
-                "A spot opened up — you’re now confirmed for the match."
-              );
+              Alert.alert("You’re in! ✅", "A spot opened up — you’re now confirmed for the match.");
             }
           }
 
@@ -268,6 +301,31 @@ export default function MatchDetailScreen() {
       unsubRsvps();
     };
   }, [matchIdStr, user?.uid]);
+
+  // ✅ Whenever RSVP list changes, load the relevant user docs (Option A)
+  useEffect(() => {
+    const uids = rsvps.map((r) => r.userId).filter(Boolean) as string[];
+    if (uids.length === 0) return;
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const map = await loadUserProfilesByUids(uids);
+        if (cancelled) return;
+
+        const obj: Record<string, UserProfileMini> = {};
+        map.forEach((v, k) => (obj[k] = v));
+        setUserProfiles((prev) => ({ ...prev, ...obj }));
+      } catch (e) {
+        console.warn("Failed to load user profiles for avatars", e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [rsvps]);
 
   const isHost = useMemo(() => {
     return !!user?.uid && !!match?.createdBy && match.createdBy === user.uid;
@@ -383,7 +441,6 @@ export default function MatchDetailScreen() {
 
       const matchData = matchSnap.data() as any;
       const maxPlayersFresh: number = Number(matchData.maxPlayers ?? 0);
-
       const matchStatus = String(matchData.status ?? "scheduled").toLowerCase();
 
       if ((matchStatus === "cancelled" || matchStatus === "canceled") && status !== "no") {
@@ -417,47 +474,32 @@ export default function MatchDetailScreen() {
 
       if (status === "no") isWaitlisted = false;
 
-      // ✅ name + avatar fields come from *your own* user doc (allowed by rules)
+      // Keep using RSVP.playerName for display (fast). We do NOT store photo on RSVP (Option A).
       let playerName = user.email ?? user.uid;
-      let myPhotoURL: string | null = user.photoURL ?? null;
-      let photoVersion: number | null = null;
-
       try {
         const userDocRef = doc(db, "users", user.uid);
         const userSnap = await getDoc(userDocRef);
         if (userSnap.exists()) {
           const data = userSnap.data() as any;
           if (data?.displayName) playerName = data.displayName;
-          if (data?.photoURL) myPhotoURL = data.photoURL;
-
-          // use updatedAt as a cache-busting version (ms)
-          const ms =
-            typeof data?.updatedAt?.toMillis === "function"
-              ? data.updatedAt.toMillis()
-              : typeof data?.updatedAt?.toDate === "function"
-              ? data.updatedAt.toDate().getTime()
-              : null;
-
-          if (typeof ms === "number" && Number.isFinite(ms)) photoVersion = ms;
         }
       } catch (innerErr) {
-        console.warn("Could not load user profile for RSVP", innerErr);
+        console.warn("Could not load user profile for RSVP name", innerErr);
       }
 
       const rsvpRef = doc(db, "rsvps", rsvpId);
-      await setDoc(rsvpRef, {
-        matchId: matchIdStr,
-        userId: user.uid,
-        playerName,
-        status,
-        isWaitlisted,
-
-        // ✅ store avatar info on RSVP doc (so teammates can render it)
-        photoURL: myPhotoURL,
-        photoVersion,
-
-        updatedAt: serverTimestamp(),
-      });
+      await setDoc(
+        rsvpRef,
+        {
+          matchId: matchIdStr,
+          userId: user.uid,
+          playerName,
+          status,
+          isWaitlisted,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
 
       setUserStatus(status);
 
@@ -528,7 +570,6 @@ export default function MatchDetailScreen() {
       setExportingCalendar(true);
 
       const endAt = new Date(startAt.getTime() + 90 * 60 * 1000);
-
       const deadlineText = deadlineAt ? `RSVP deadline: ${deadlineAt.toLocaleString()}` : "";
 
       const notes = [
@@ -576,13 +617,8 @@ export default function MatchDetailScreen() {
     );
   };
 
-  if (!matchIdStr) {
-    return renderScroll(<Text>Missing match id.</Text>);
-  }
-
-  if (loadingMatch || !match) {
-    return renderScroll(<Text>Loading match...</Text>);
-  }
+  if (!matchIdStr) return renderScroll(<Text>Missing match id.</Text>);
+  if (loadingMatch || !match) return renderScroll(<Text>Loading match...</Text>);
 
   const statusText =
     statusLabel === "played"
@@ -644,7 +680,6 @@ export default function MatchDetailScreen() {
         </View>
       )}
 
-      {/* Match Chat entry point */}
       <View style={{ marginTop: 10, alignSelf: "flex-start" }}>
         <Button title="Open Match Chat" onPress={handleOpenChat} />
       </View>
@@ -691,21 +726,26 @@ export default function MatchDetailScreen() {
         </View>
       )}
 
-      {/* ✅ Avatars list */}
+      {/* ✅ Avatars list (Option A: read from users/{uid}.photoURL) */}
       <Text style={styles.sectionTitle}>Going</Text>
       {goingSorted.length === 0 && <Text>No confirmed players yet.</Text>}
+
       {goingSorted.map((r) => {
-        const name = String(r.playerName || r.userId || "Unknown");
+        const uid = r.userId ?? "";
+        const prof = uid ? userProfiles[uid] : undefined;
+
+        const name = String(r.playerName || prof?.displayName || r.userId || "Unknown");
         const subtitle =
-          r.userId && r.userId === match.createdBy ? "Host" : r.userId === user?.uid ? "You" : "";
+          uid && uid === match.createdBy ? "Host" : uid === user?.uid ? "You" : "";
+
         return (
           <PersonRow
             key={r.id}
             name={name}
             subtitle={subtitle || undefined}
-            photoURL={r.photoURL ?? null}
-            photoVersion={r.photoVersion ?? null}
-            highlight={r.userId === user?.uid}
+            photoURL={prof?.photoURL ?? null}
+            updatedAtMs={prof?.updatedAtMs ?? null}
+            highlight={uid === user?.uid}
           />
         );
       })}
@@ -714,16 +754,20 @@ export default function MatchDetailScreen() {
         <>
           <Text style={styles.sectionTitle}>Waitlist</Text>
           {waitlistSorted.map((r) => {
-            const name = String(r.playerName || r.userId || "Unknown");
-            const subtitle = r.userId === user?.uid ? "You" : undefined;
+            const uid = r.userId ?? "";
+            const prof = uid ? userProfiles[uid] : undefined;
+
+            const name = String(r.playerName || prof?.displayName || r.userId || "Unknown");
+            const subtitle = uid === user?.uid ? "You" : undefined;
+
             return (
               <PersonRow
                 key={r.id}
                 name={name}
                 subtitle={subtitle}
-                photoURL={r.photoURL ?? null}
-                photoVersion={r.photoVersion ?? null}
-                highlight={r.userId === user?.uid}
+                photoURL={prof?.photoURL ?? null}
+                updatedAtMs={prof?.updatedAtMs ?? null}
+                highlight={uid === user?.uid}
               />
             );
           })}
@@ -772,7 +816,6 @@ const styles = StyleSheet.create({
   title: { fontSize: 20, fontWeight: "bold" },
 
   subtle: { marginTop: 4, color: "#666" },
-
   location: { marginTop: 10, color: "#444" },
 
   sectionTitle: { marginTop: 16, fontWeight: "700" },
@@ -827,7 +870,6 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
 
-  // ✅ Avatar list row styles
   personRow: {
     flexDirection: "row",
     alignItems: "center",

@@ -5,7 +5,12 @@ import { getFunctions } from "firebase/functions";
 import { getStorage } from "firebase/storage";
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { type Auth, getAuth, getReactNativePersistence, initializeAuth } from "firebase/auth";
+import {
+  type Auth,
+  getAuth,
+  getReactNativePersistence,
+  initializeAuth,
+} from "firebase/auth";
 
 const firebaseConfig = {
   apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY,
@@ -19,22 +24,20 @@ const firebaseConfig = {
 // ✅ Avoid re-initializing during Fast Refresh
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 
-// ✅ Give auth a real TS type (fixes “implicitly has any”)
+// ✅ Persistent auth for React Native
 let auth: Auth;
 try {
   auth = initializeAuth(app, {
     persistence: getReactNativePersistence(AsyncStorage),
   });
 } catch {
-  // If initializeAuth was already called (Fast Refresh), fall back
+  // If initializeAuth already ran (Fast Refresh), fall back
   auth = getAuth(app);
 }
 
 export { auth };
 export const db = getFirestore(app);
 export const storage = getStorage(app);
-
-// ✅ This is what your teams.tsx needs
 export const functions = getFunctions(app);
 
 // Optional emulator wiring
