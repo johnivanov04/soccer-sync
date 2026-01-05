@@ -6,7 +6,9 @@ import {
   addDoc,
   collection,
   doc,
+  documentId,
   getDoc,
+  getDocs,
   limit,
   orderBy,
   query,
@@ -42,11 +44,20 @@ type ChatMessage = {
   userId: string;
   displayName: string;
   text: string;
+  // legacy field (we won't trust it for rendering in Option A)
   photoURL?: string | null;
   createdAt?: any;
 
   // stable timestamp for grouping
   stableMs: number;
+};
+
+type UserProfileMini = {
+  uid: string;
+  displayName: string | null;
+  photoURL: string | null;
+  // Prefer photoUpdatedAtMs if present, else updatedAtMs
+  photoVersionMs: number | null;
 };
 
 function paramToString(v: any): string | null {
@@ -106,6 +117,52 @@ function formatDayLabelMs(ms: number) {
   return d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
 }
 
+// ✅ cache-busted avatar URI (critical when overwriting avatar.jpg)
+function avatarUri(photoURL?: string | null, versionMs?: number | null) {
+  if (!photoURL) return null;
+  const v = Number.isFinite(versionMs as any) ? String(versionMs) : "0";
+  return photoURL.includes("?") ? `${photoURL}&v=${v}` : `${photoURL}?v=${v}`;
+}
+
+async function loadUserProfilesByUids(uids: string[]) {
+  const uniq = Array.from(new Set(uids.filter(Boolean)));
+  const out = new Map<string, UserProfileMini>();
+  if (uniq.length === 0) return out;
+
+  const CHUNK = 10; // Firestore "in" limit
+  for (let i = 0; i < uniq.length; i += CHUNK) {
+    const slice = uniq.slice(i, i + CHUNK);
+    const usersCol = collection(db, "users");
+    const q = query(usersCol, where(documentId(), "in", slice));
+    const snap = await getDocs(q);
+
+    for (const d of snap.docs) {
+      const data = d.data() as any;
+
+      const updatedAtMs =
+        typeof data?.updatedAt?.toMillis === "function"
+          ? data.updatedAt.toMillis()
+          : typeof data?.updatedAt?.toDate === "function"
+          ? data.updatedAt.toDate().getTime()
+          : null;
+
+      const photoUpdatedAtMs =
+        typeof data?.photoUpdatedAtMs === "number" && Number.isFinite(data.photoUpdatedAtMs)
+          ? data.photoUpdatedAtMs
+          : null;
+
+      out.set(d.id, {
+        uid: d.id,
+        displayName: (data?.displayName as string) ?? null,
+        photoURL: (data?.photoURL as string) ?? null,
+        photoVersionMs: photoUpdatedAtMs ?? (typeof updatedAtMs === "number" ? updatedAtMs : null),
+      });
+    }
+  }
+
+  return out;
+}
+
 export default function MatchChatScreen() {
   const router = useRouter();
   const params = useLocalSearchParams();
@@ -125,6 +182,9 @@ export default function MatchChatScreen() {
   // ✅ per-match mute state (stored at users/{uid}/chatPrefs/{matchId})
   const [muted, setMuted] = useState(false);
   const [togglingMute, setTogglingMute] = useState(false);
+
+  // ✅ Option A: profiles map so avatars update live
+  const [userProfiles, setUserProfiles] = useState<Record<string, UserProfileMini>>({});
 
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const didInitialScroll = useRef(false);
@@ -335,6 +395,7 @@ export default function MatchChatScreen() {
             userId: String(data.userId ?? ""),
             displayName: String(data.displayName ?? "Someone"),
             text: String(data.text ?? ""),
+            // keep legacy for older clients, but UI will ignore it for avatar rendering
             photoURL: (data.photoURL as string) ?? null,
             createdAt: data.createdAt,
             stableMs,
@@ -362,6 +423,31 @@ export default function MatchChatScreen() {
 
     return () => unsub();
   }, [matchIdStr]);
+
+  // ✅ Option A: load user profiles for all message senders (avatars)
+  useEffect(() => {
+    const uids = Array.from(new Set(messages.map((m) => m.userId).filter(Boolean)));
+    if (uids.length === 0) return;
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const map = await loadUserProfilesByUids(uids);
+        if (cancelled) return;
+
+        const obj: Record<string, UserProfileMini> = {};
+        map.forEach((v, k) => (obj[k] = v));
+        setUserProfiles((prev) => ({ ...prev, ...obj }));
+      } catch (e) {
+        console.warn("Failed to load user profiles for chat avatars", e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [messages]);
 
   // Initial scroll
   useEffect(() => {
@@ -412,6 +498,7 @@ export default function MatchChatScreen() {
         // ignore
       }
 
+      // We still store photoURL for backwards compat, but UI renders from users/{uid}
       await addDoc(collection(db, "matchMessages"), {
         matchId: matchIdStr,
         teamId: matchTeamId,
@@ -514,7 +601,12 @@ export default function MatchChatScreen() {
           ListEmptyComponent={<Text style={styles.emptyText}>No messages yet. Say hi 👋</Text>}
           renderItem={({ item, index }) => {
             const mine = item.userId === user?.uid;
-            const initials = initialsFromName(item.displayName);
+
+            // ✅ Option A: derive avatar from users/{uid}
+            const prof = item.userId ? userProfiles[item.userId] : undefined;
+            const nameForInitials = item.displayName || prof?.displayName || "Someone";
+            const initials = initialsFromName(nameForInitials);
+            const uri = avatarUri(prof?.photoURL ?? null, prof?.photoVersionMs ?? null);
 
             const prev = messages[index - 1];
             const next = messages[index + 1];
@@ -560,8 +652,12 @@ export default function MatchChatScreen() {
                   {!mine ? (
                     showMeta ? (
                       <View style={styles.avatarWrap}>
-                        {item.photoURL ? (
-                          <Image source={{ uri: item.photoURL }} style={styles.avatarImg} />
+                        {uri ? (
+                          <Image
+                            source={{ uri }}
+                            style={styles.avatarImg}
+                            cachePolicy="none"
+                          />
                         ) : (
                           <View style={styles.avatarFallback}>
                             <Text style={styles.avatarText}>{initials}</Text>
@@ -576,7 +672,9 @@ export default function MatchChatScreen() {
                   )}
 
                   <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleOther]}>
-                    {!mine && showMeta && <Text style={styles.bubbleName}>{item.displayName}</Text>}
+                    {!mine && showMeta && (
+                      <Text style={styles.bubbleName}>{item.displayName}</Text>
+                    )}
 
                     <Text style={styles.bubbleText}>{item.text}</Text>
 
@@ -586,8 +684,12 @@ export default function MatchChatScreen() {
                   {mine ? (
                     showMeta ? (
                       <View style={styles.avatarWrap}>
-                        {item.photoURL ? (
-                          <Image source={{ uri: item.photoURL }} style={styles.avatarImg} />
+                        {uri ? (
+                          <Image
+                            source={{ uri }}
+                            style={styles.avatarImg}
+                            cachePolicy="none"
+                          />
                         ) : (
                           <View style={styles.avatarFallback}>
                             <Text style={styles.avatarText}>{initials}</Text>
