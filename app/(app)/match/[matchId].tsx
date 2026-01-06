@@ -548,7 +548,18 @@ export default function MatchDetailScreen() {
     if (!matchIdStr) return;
     try {
       const matchRef = doc(db, "matches", matchIdStr);
-      await updateDoc(matchRef, { status: nextStatus, updatedAt: serverTimestamp() });
+      await updateDoc(matchRef, {
+        status: nextStatus,
+
+        // ✅ used by Cloud Function to avoid notifying the actor
+        updatedBy: user?.uid ?? null,
+
+        // ✅ OPTIONAL: makes it easier to distinguish "status changes" from normal edits later
+        statusUpdatedBy: user?.uid ?? null,
+        statusUpdatedAt: serverTimestamp(),
+
+        updatedAt: serverTimestamp(),
+      });
     } catch (e) {
       console.error("Error updating match status", e);
       Alert.alert("Error", "Could not update match status.");

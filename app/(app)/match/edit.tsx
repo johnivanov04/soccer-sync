@@ -94,7 +94,7 @@ export default function EditMatchScreen() {
   const isHost = !!user?.uid && match?.createdBy === user.uid;
 
   const status: MatchStatus = useMemo(
-    () => ((match?.status ?? "scheduled") as string).toLowerCase(),
+    () => String(match?.status ?? "scheduled").toLowerCase(),
     [match?.status]
   );
 
@@ -141,9 +141,10 @@ export default function EditMatchScreen() {
       return;
     }
 
+    // allow small grace period; disallow clearly-in-the-past edits
     const now = Date.now();
     if (date.getTime() < now - 5 * 60 * 1000) {
-      Alert.alert("Start time must be in the future.");
+      Alert.alert("Start time must be in the future (or very close to now).");
       return;
     }
 
@@ -191,6 +192,10 @@ export default function EditMatchScreen() {
         minPlayers: minPlayersNum,
         description: desc,
         ...(useDeadline ? { rsvpDeadline: deadlineDate } : { rsvpDeadline: deleteField() }),
+
+        // ✅ for push notifications (exclude editor)
+        updatedBy: user?.uid ?? null,
+
         updatedAt: serverTimestamp(),
       });
 

@@ -53,7 +53,9 @@ async function getMutedUidsForMatch(uids: string[], matchId: string): Promise<Se
   const list = uniqStrings(uids);
   if (!matchId || list.length === 0) return new Set();
 
-  const refs = list.map((uid) => db.collection("users").doc(uid).collection("chatPrefs").doc(matchId));
+  const refs = list.map((uid) =>
+    db.collection("users").doc(uid).collection("chatPrefs").doc(matchId)
+  );
 
   const snaps = await (db as any).getAll(...refs);
 
@@ -658,6 +660,191 @@ async function promoteIfNeeded(matchId: string) {
 
   await sendExpoPushMany(pushes, tokenToUid);
 }
+
+// -------------------- MATCH UPDATE NOTIFICATIONS (CANCELLED / EDITED) --------------------
+
+function tsToMs(raw: any): number {
+  if (!raw) return 0;
+  if (typeof raw?.toMillis === "function") return raw.toMillis();
+  if (typeof raw?.toDate === "function") return raw.toDate().getTime();
+  if (raw instanceof Date) return raw.getTime();
+  if (typeof raw === "number") return raw;
+  const d = new Date(raw);
+  return Number.isFinite(d.getTime()) ? d.getTime() : 0;
+}
+
+function normStatus(raw: any) {
+  const s = String(raw ?? "").toLowerCase().trim();
+  return s === "canceled" ? "cancelled" : s;
+}
+
+function truncLine(s: any, n: number) {
+  const t = String(s ?? "").trim();
+  if (!t) return "";
+  return t.length > n ? t.slice(0, n - 1) + "…" : t;
+}
+
+function changed(before: any, after: any, key: string) {
+  const b = before?.[key];
+  const a = after?.[key];
+
+  // timestamps/Firestore types
+  const bm = tsToMs(b);
+  const am = tsToMs(a);
+  if (bm || am) return bm !== am;
+
+  // primitives / objects
+  return JSON.stringify(b ?? null) !== JSON.stringify(a ?? null);
+}
+
+function summarizeMatchWhen(match: any): string {
+  try {
+    const ms = tsToMs(match?.startDateTime);
+    if (!Number.isFinite(ms) || ms <= 0) return "";
+    const d = new Date(ms);
+    return d.toLocaleString("en-US", {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  } catch {
+    return "";
+  }
+}
+
+export const onMatchWriteNotify = onDocumentWritten("matches/{matchId}", async (event) => {
+  const before = event.data?.before?.data() as any | undefined;
+  const after = event.data?.after?.data() as any | undefined;
+
+  const matchId = String(event.params.matchId ?? "");
+  if (!matchId) return;
+
+  // if deleted, ignore
+  if (!after) return;
+
+  // idempotency: only act once per event.id
+  const eventId = String((event as any)?.id ?? "");
+  if (!eventId) return;
+
+  const evRef = db.collection("matchNotifyEvents").doc(eventId);
+  try {
+    await evRef.create({
+      matchId,
+      createdAt: FieldValue.serverTimestamp(),
+      kind: "matchWrite",
+    });
+  } catch {
+    // already processed
+    return;
+  }
+
+  const bStatus = normStatus(before?.status);
+  const aStatus = normStatus(after?.status);
+
+  const cancelledNow = aStatus === "cancelled" && bStatus !== "cancelled";
+
+  // What counts as an "edit" worth notifying:
+  const changedTime = changed(before, after, "startDateTime");
+  const changedLoc = changed(before, after, "locationText");
+  const changedMax = changed(before, after, "maxPlayers");
+  const changedDeadline = changed(before, after, "rsvpDeadline");
+  const changedNotes = changed(before, after, "description");
+
+  const editedNow =
+    !cancelledNow && (changedTime || changedLoc || changedMax || changedDeadline || changedNotes);
+
+  if (!cancelledNow && !editedNow) return;
+
+  // Exclude the person who made the change if provided
+  const actorUid = after?.updatedBy ? String(after.updatedBy) : "";
+
+  // Recipients: YES/MAYBE + host
+  const matchRef = db.collection("matches").doc(matchId);
+  const matchSnap = await matchRef.get();
+  if (!matchSnap.exists) return;
+  const match = matchSnap.data() as any;
+
+  const hostId = match?.createdBy ? String(match.createdBy) : "";
+
+  const rsvpSnap = await db.collection("rsvps").where("matchId", "==", matchId).get();
+
+  const recipientIds: string[] = [];
+  for (const d of rsvpSnap.docs) {
+    const r = d.data() as any;
+    const uid = r?.userId ? String(r.userId) : "";
+    const st = String(r?.status ?? "").toLowerCase();
+    if (!uid) continue;
+    if (st === "yes" || st === "maybe") recipientIds.push(uid);
+  }
+  if (hostId) recipientIds.push(hostId);
+
+  const uniqueRecipients = uniqStrings(recipientIds).filter((uid) => uid && uid !== actorUid);
+  if (uniqueRecipients.length === 0) return;
+
+  // Respect per-match mute (same as chat)
+  let mutedSet = new Set<string>();
+  try {
+    mutedSet = await getMutedUidsForMatch(uniqueRecipients, matchId);
+  } catch {
+    mutedSet = new Set();
+  }
+
+  const finalRecipients = uniqueRecipients.filter((uid) => !mutedSet.has(uid));
+  if (finalRecipients.length === 0) return;
+
+  // Compose push copy
+  const when = summarizeMatchWhen(match);
+  const loc = truncLine(match?.locationText, 70);
+
+  let title = "Match updated";
+  let body = "Tap to view details.";
+
+  if (cancelledNow) {
+    title = "Match cancelled ❌";
+    body =
+      [when ? `Scheduled: ${when}` : "", loc ? `Location: ${loc}` : ""].filter(Boolean).join(" • ") ||
+      "This match was cancelled.";
+  } else {
+    const changes: string[] = [];
+    if (changedTime) changes.push("time");
+    if (changedLoc) changes.push("location");
+    if (changedMax) changes.push("max players");
+    if (changedDeadline) changes.push("RSVP deadline");
+    if (changedNotes) changes.push("notes");
+
+    const changeText = changes.length ? `Updated: ${changes.join(", ")}` : "Match updated";
+    body = [changeText, when ? `• ${when}` : "", loc ? `• ${loc}` : ""].filter(Boolean).join(" ");
+    body = truncLine(body, 180);
+  }
+
+  // Send pushes (de-dupe tokens across accounts/devices)
+  const pushes: PushMessage[] = [];
+  const sentTokens = new Set<string>();
+  const tokenToUid = new Map<string, string>();
+
+  for (const uid of finalRecipients) {
+    const tokens = await getUserTokens(uid);
+    for (const t of tokens) {
+      if (sentTokens.has(t)) continue;
+      sentTokens.add(t);
+      tokenToUid.set(t, uid);
+
+      pushes.push({
+        to: t,
+        title,
+        body,
+        sound: "default",
+        data: { type: "matchUpdate", matchId, kind: cancelledNow ? "cancelled" : "edited" },
+      });
+    }
+  }
+
+  if (pushes.length === 0) return;
+
+  await sendExpoPushMany(pushes, tokenToUid);
+});
 
 // -------------------- CHAT NOTIFICATIONS + MATCH PREVIEW FIELDS + SEQ --------------------
 export const onMatchMessageCreate = onDocumentCreated("matchMessages/{msgId}", async (event) => {
