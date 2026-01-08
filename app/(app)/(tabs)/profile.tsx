@@ -29,9 +29,6 @@ import { deleteObject, getDownloadURL, ref, uploadBytes } from "firebase/storage
 import { useAuth } from "../../../src/context/AuthContext";
 import { db, storage } from "../../../src/firebaseConfig";
 
-// ✅ same logo as auth screens
-const LOGO = require("../../../assets/images/pickupsoccerlogo.png");
-
 type UserDoc = {
   displayName?: string;
   teamId?: string | null;
@@ -196,7 +193,6 @@ export default function ProfileScreen() {
         { merge: true }
       );
 
-      // Optional: keep Firebase Auth displayName in sync
       try {
         await updateProfile(user, { displayName: trimmed });
       } catch (e) {
@@ -217,7 +213,6 @@ export default function ProfileScreen() {
     setDisplayName(savedDisplayName);
   };
 
-  // ✅ upload -> Storage, save URL + path on users/{uid}
   const handlePickPhoto = async () => {
     if (!user?.uid) return;
 
@@ -248,7 +243,7 @@ export default function ProfileScreen() {
       const resp = await fetch(asset.uri);
       const blob = await resp.blob();
 
-      const newPath = `avatars/${user.uid}/avatar.jpg`; // deterministic (overwrite)
+      const newPath = `avatars/${user.uid}/avatar.jpg`;
       const storageRef = ref(storage, newPath);
 
       await uploadBytes(storageRef, blob, {
@@ -383,12 +378,8 @@ export default function ProfileScreen() {
             contentContainerStyle={styles.container}
             keyboardShouldPersistTaps="handled"
           >
-            {/* Hero */}
+            {/* Hero (no logo) */}
             <View style={styles.hero}>
-              <View style={styles.logoWrap}>
-                <Image source={LOGO} style={styles.logo} contentFit="contain" />
-              </View>
-
               <Text style={styles.heroTitle}>Your Profile</Text>
               <Text style={styles.heroSub}>
                 Set your name + photo so your squad recognizes you.
@@ -397,7 +388,6 @@ export default function ProfileScreen() {
 
             {/* Main Card */}
             <View style={styles.card}>
-              {/* Avatar + info row */}
               <View style={styles.avatarRow}>
                 <View style={styles.avatarWrap}>
                   {avatarUri ? (
@@ -453,7 +443,6 @@ export default function ProfileScreen() {
                 </View>
               </View>
 
-              {/* Name edit */}
               <Text style={[styles.label, { marginTop: 16 }]}>Display name</Text>
               <View style={styles.inputRow}>
                 <Text style={styles.icon}>👤</Text>
@@ -469,7 +458,6 @@ export default function ProfileScreen() {
                 />
               </View>
 
-              {/* Actions */}
               <View style={styles.btnRow}>
                 <Pressable
                   onPress={handleSave}
@@ -502,7 +490,6 @@ export default function ProfileScreen() {
                 </Pressable>
               </View>
 
-              {/* Team */}
               <View style={styles.divider} />
               <Text style={styles.sectionLabel}>Current team</Text>
               <Text style={styles.sectionValue}>{effectiveTeamLabel}</Text>
@@ -511,7 +498,6 @@ export default function ProfileScreen() {
               )}
             </View>
 
-            {/* Sign out */}
             <Pressable
               onPress={signOut}
               style={({ pressed }) => [
@@ -545,8 +531,6 @@ const styles = StyleSheet.create({
   },
 
   hero: { alignItems: "center", marginBottom: 14 },
-  logoWrap: { width: 140, height: 90, marginBottom: 8 },
-  logo: { width: "100%", height: "100%" },
 
   heroTitle: { fontSize: 34, fontWeight: "900", color: "white" },
   heroSub: {
