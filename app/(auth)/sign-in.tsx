@@ -19,16 +19,17 @@ const LOGO = require("../../assets/images/pickupsoccerlogo.png");
 
 export default function SignInScreen() {
   const router = useRouter();
-  const { signIn } = useAuth();
+  const { signIn, resetPassword } = useAuth();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [resetLoading, setResetLoading] = useState(false);
 
   const canSubmit = useMemo(() => {
-    return email.trim().length > 0 && password.length > 0 && !loading;
-  }, [email, password, loading]);
+    return email.trim().length > 0 && password.length > 0 && !loading && !resetLoading;
+  }, [email, password, loading, resetLoading]);
 
   const handleSignIn = async () => {
     try {
@@ -41,6 +42,20 @@ export default function SignInScreen() {
       setError(e?.message || "Could not sign in");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleForgotPassword = async () => {
+    try {
+      setError("");
+      setResetLoading(true);
+      await resetPassword(email);
+      setError("Password reset email sent. Check your inbox.");
+    } catch (e: any) {
+      console.error(e);
+      setError(e?.message || "Could not send reset email.");
+    } finally {
+      setResetLoading(false);
     }
   };
 
@@ -77,7 +92,7 @@ export default function SignInScreen() {
               keyboardType="email-address"
               value={email}
               onChangeText={setEmail}
-              editable={!loading}
+              editable={!loading && !resetLoading}
             />
           </View>
 
@@ -91,9 +106,16 @@ export default function SignInScreen() {
               secureTextEntry
               value={password}
               onChangeText={setPassword}
-              editable={!loading}
+              editable={!loading && !resetLoading}
             />
           </View>
+
+          {/* ✅ Forgot password */}
+          <Pressable onPress={handleForgotPassword} disabled={loading || resetLoading}>
+            <Text style={[styles.link, { marginTop: 12, marginBottom: 2 }]}>
+              {resetLoading ? "Sending reset email..." : "Forgot password?"}
+            </Text>
+          </Pressable>
 
           <Pressable
             onPress={handleSignIn}
@@ -111,7 +133,7 @@ export default function SignInScreen() {
             )}
           </Pressable>
 
-          <Pressable onPress={() => router.push("/(auth)/sign-up")} disabled={loading}>
+          <Pressable onPress={() => router.push("/(auth)/sign-up")} disabled={loading || resetLoading}>
             <Text style={styles.link}>
               Don’t have an account? <Text style={styles.linkStrong}>Sign up</Text>
             </Text>
@@ -131,7 +153,6 @@ const styles = StyleSheet.create({
   bg: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: "#052b22",
-    // subtle “depth” without any lines:
     opacity: 1,
   },
 
@@ -206,7 +227,7 @@ const styles = StyleSheet.create({
   },
 
   primaryBtn: {
-    marginTop: 18,
+    marginTop: 14,
     height: 54,
     borderRadius: 18,
     alignItems: "center",

@@ -1,11 +1,6 @@
 // app/_layout.tsx
 import * as Notifications from "expo-notifications";
-import {
-  Slot,
-  useRootNavigationState,
-  useRouter,
-  useSegments,
-} from "expo-router";
+import { Slot, useRootNavigationState, useRouter, useSegments } from "expo-router";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { AuthProvider, useAuth } from "../src/context/AuthContext";
 import { initNotifications } from "../src/utils/notificationsSetup";
@@ -59,11 +54,7 @@ function RootNavigation() {
       const data = safeJsonParse((rawData as any)?.data ?? rawData) as any;
 
       const matchIdRaw =
-        data?.matchId ??
-        data?.matchID ??
-        data?.match_id ??
-        data?.data?.matchId ??
-        null;
+        data?.matchId ?? data?.matchID ?? data?.match_id ?? data?.data?.matchId ?? null;
 
       if (!matchIdRaw) return null;
       const matchId = String(matchIdRaw);
@@ -92,8 +83,7 @@ function RootNavigation() {
 
       // ✅ Fallback heuristic for cold starts where data.type is missing
       const title = String(content?.title ?? "").toLowerCase();
-      const looksLikeChat =
-        title.includes("match chat") || title.includes("chat");
+      const looksLikeChat = title.includes("match chat") || title.includes("chat");
 
       const goChat = openChatExplicit || looksLikeChat;
 
@@ -135,7 +125,7 @@ function RootNavigation() {
   );
 
   const handleNotificationResponse = useCallback(
-    async (response: Notifications.NotificationResponse, source: string) => {
+    async (response: Notifications.NotificationResponse) => {
       const notifId = response?.notification?.request?.identifier ?? null;
 
       // de-dupe per notification id
@@ -170,32 +160,27 @@ function RootNavigation() {
     [buildTargetFromNotification, navReady, initializing, user, navigateToTarget]
   );
 
-  const tryHandleLastResponse = useCallback(
-    async (label: string) => {
-      try {
-        const last = await Notifications.getLastNotificationResponseAsync();
-        if (last) {
-          await handleNotificationResponse(last, `getLast:${label}`);
-        }
-      } catch (e) {
-        console.warn("getLastNotificationResponseAsync failed", e);
+  const tryHandleLastResponse = useCallback(async () => {
+    try {
+      const last = await Notifications.getLastNotificationResponseAsync();
+      if (last) {
+        await handleNotificationResponse(last);
       }
-    },
-    [handleNotificationResponse]
-  );
+    } catch (e) {
+      console.warn("getLastNotificationResponseAsync failed", e);
+    }
+  }, [handleNotificationResponse]);
 
   // Listen for notification taps + cold start recovery
   useEffect(() => {
     const sub = Notifications.addNotificationResponseReceivedListener((resp) => {
-      handleNotificationResponse(resp, "listener");
+      handleNotificationResponse(resp);
     });
 
     // ✅ Cold-start recovery:
-    // On killed-app launch from tap, listener may miss the tap and getLast may be stale if called too early.
-    // So we re-check after short delays.
-    tryHandleLastResponse("t0");
-    const t1 = setTimeout(() => tryHandleLastResponse("t400"), 400);
-    const t2 = setTimeout(() => tryHandleLastResponse("t1200"), 1200);
+    tryHandleLastResponse();
+    const t1 = setTimeout(() => tryHandleLastResponse(), 400);
+    const t2 = setTimeout(() => tryHandleLastResponse(), 1200);
 
     // ✅ After our bootstrap window, allow default auth routing if nothing was handled
     const tDone = setTimeout(() => setNotifBootstrapDone(true), 1400);
@@ -211,9 +196,8 @@ function RootNavigation() {
   // ✅ Also re-check once navigation becomes ready (helps some Android timing cases)
   useEffect(() => {
     if (!navReady) return;
-    // only do this if we haven't already handled something this launch
     if (!handledAnyThisLaunchRef.current) {
-      tryHandleLastResponse("navReady");
+      tryHandleLastResponse();
     }
   }, [navReady, tryHandleLastResponse]);
 
@@ -222,13 +206,22 @@ function RootNavigation() {
     if (!navReady || initializing) return;
 
     // ✅ On cold start, wait until the notification bootstrap window has finished
-    // (prevents auth redirect to Matches from winning the race)
     if (isColdStart && !notifBootstrapDone) return;
 
     const inAuthGroup = segments[0] === "(auth)";
+    // ✅ FIX: no segments[1] indexing (avoids tuple typing issue)
+    const inVerifyEmail = segments.includes("verify-email");
 
     if (!user) {
       if (!inAuthGroup) router.replace("/(auth)/sign-in");
+      return;
+    }
+
+    // ✅ Email verification gate (Option 1)
+    if (!user.emailVerified) {
+      if (!inAuthGroup || !inVerifyEmail) {
+        router.replace("/(auth)/verify-email");
+      }
       return;
     }
 
@@ -236,7 +229,6 @@ function RootNavigation() {
       const target = pendingRouteRef.current;
       pendingRouteRef.current = null;
 
-      // ✅ preserve back here too
       navigateToTarget(target);
       return;
     }

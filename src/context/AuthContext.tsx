@@ -6,6 +6,9 @@ import {
   createUserWithEmailAndPassword,
   signOut as fbSignOut,
   onAuthStateChanged,
+  reload,
+  sendEmailVerification,
+  sendPasswordResetEmail,
   signInWithEmailAndPassword,
   updateProfile,
   User,
@@ -19,9 +22,15 @@ import { registerForPushNotificationsAsync } from "../utils/pushNotifications";
 interface AuthContextValue {
   user: User | null;
   initializing: boolean;
+
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (email: string, password: string, displayName?: string) => Promise<void>;
   signOut: () => Promise<void>;
+
+  // ✅ Option 1 additions
+  resetPassword: (email: string) => Promise<void>;
+  sendVerificationEmail: () => Promise<void>;
+  refreshUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -109,21 +118,58 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       userRef,
       {
         email: fbUser.email ?? email,
-        ...(displayName && displayName.trim()
-          ? { displayName: displayName.trim() }
-          : {}),
+        ...(displayName && displayName.trim() ? { displayName: displayName.trim() } : {}),
         createdAt: serverTimestamp(),
       },
       { merge: true }
     );
+
+    // ✅ Send verification email on signup (non-blocking, but we await so user sees errors)
+    try {
+      await sendEmailVerification(fbUser);
+    } catch (e) {
+      console.warn("Could not send verification email", e);
+      // we won't throw: user can resend from the verify screen
+    }
   };
 
   const signOut = async () => {
     await fbSignOut(auth);
   };
 
+  // ✅ Option 1 additions
+  const resetPassword = async (email: string) => {
+    const mail = String(email ?? "").trim();
+    if (!mail) throw new Error("Enter your email first.");
+    await sendPasswordResetEmail(auth, mail);
+  };
+
+  const sendVerificationEmail = async () => {
+    const u = auth.currentUser;
+    if (!u) throw new Error("Not signed in.");
+    await sendEmailVerification(u);
+  };
+
+  const refreshUser = async () => {
+    const u = auth.currentUser;
+    if (!u) return;
+    await reload(u);
+    setUser(auth.currentUser);
+  };
+
   return (
-    <AuthContext.Provider value={{ user, initializing, signIn, signUp, signOut }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        initializing,
+        signIn,
+        signUp,
+        signOut,
+        resetPassword,
+        sendVerificationEmail,
+        refreshUser,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );
