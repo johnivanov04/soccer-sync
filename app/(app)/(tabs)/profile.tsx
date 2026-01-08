@@ -5,7 +5,8 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
-  Button,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -16,11 +17,20 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { updateProfile } from "firebase/auth";
-import { doc, getDoc, onSnapshot, serverTimestamp, setDoc } from "firebase/firestore";
+import {
+  doc,
+  getDoc,
+  onSnapshot,
+  serverTimestamp,
+  setDoc,
+} from "firebase/firestore";
 import { deleteObject, getDownloadURL, ref, uploadBytes } from "firebase/storage";
 
 import { useAuth } from "../../../src/context/AuthContext";
 import { db, storage } from "../../../src/firebaseConfig";
+
+// ✅ same logo as auth screens
+const LOGO = require("../../../assets/images/pickupsoccerlogo.png");
 
 type UserDoc = {
   displayName?: string;
@@ -34,6 +44,19 @@ type TeamDoc = {
   name?: string;
 };
 
+function initialsFromBase(base: string) {
+  const parts = base.split(" ").filter(Boolean);
+  const first = parts[0]?.[0] ?? "U";
+  const last = parts.length > 1 ? parts[parts.length - 1]?.[0] : "";
+  return (first + last).toUpperCase();
+}
+
+// Cache-bust avatar after upload (some CDNs cache aggressively)
+function withCacheBuster(url: string, v: number) {
+  if (!url) return url;
+  return url.includes("?") ? `${url}&v=${v}` : `${url}?v=${v}`;
+}
+
 export default function ProfileScreen() {
   const { user, signOut } = useAuth();
 
@@ -45,6 +68,7 @@ export default function ProfileScreen() {
 
   const [photoURL, setPhotoURL] = useState<string | null>(null);
   const [photoPath, setPhotoPath] = useState<string | null>(null);
+  const [photoVersion, setPhotoVersion] = useState<number>(Date.now());
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -53,21 +77,24 @@ export default function ProfileScreen() {
 
   const lastTeamIdRef = useRef<string | null>(null);
 
-  const initials = useMemo(() => {
-    const base =
-      (displayName?.trim() ||
-        user?.displayName?.trim() ||
-        user?.email?.split("@")[0] ||
-        "U") ?? "U";
-    const parts = base.split(" ").filter(Boolean);
-    const first = parts[0]?.[0] ?? "U";
-    const last = parts.length > 1 ? parts[parts.length - 1]?.[0] : "";
-    return (first + last).toUpperCase();
+  const baseForInitials = useMemo(() => {
+    return (
+      displayName?.trim() ||
+      user?.displayName?.trim() ||
+      user?.email?.split("@")[0] ||
+      "U"
+    );
   }, [displayName, user?.displayName, user?.email]);
+
+  const initials = useMemo(() => initialsFromBase(baseForInitials), [baseForInitials]);
 
   const isNameDirty = useMemo(() => {
     return displayName.trim() !== savedDisplayName.trim();
   }, [displayName, savedDisplayName]);
+
+  const canSave = useMemo(() => {
+    return isNameDirty && !saving && !uploadingPhoto && displayName.trim().length > 0;
+  }, [isNameDirty, saving, uploadingPhoto, displayName]);
 
   // ✅ Live subscribe to user doc so photo/name/team updates show immediately
   useEffect(() => {
@@ -114,14 +141,12 @@ export default function ProfileScreen() {
   useEffect(() => {
     const tid = teamId ? String(teamId) : null;
 
-    // reset if no team
     if (!tid) {
       setTeamName(null);
       lastTeamIdRef.current = null;
       return;
     }
 
-    // avoid refetch spam if snapshot fires repeatedly
     if (lastTeamIdRef.current === tid) return;
     lastTeamIdRef.current = tid;
 
@@ -133,7 +158,6 @@ export default function ProfileScreen() {
         const teamRef = doc(db, "teams", tid);
         const snap = await getDoc(teamRef);
         const data = snap.exists() ? (snap.data() as TeamDoc) : null;
-
         if (!alive) return;
         setTeamName((data?.name as string) || null);
       } catch (e) {
@@ -193,7 +217,7 @@ export default function ProfileScreen() {
     setDisplayName(savedDisplayName);
   };
 
-  // ✅ Option A: upload -> Storage, save URL on users/{uid}
+  // ✅ upload -> Storage, save URL + path on users/{uid}
   const handlePickPhoto = async () => {
     if (!user?.uid) return;
 
@@ -224,8 +248,7 @@ export default function ProfileScreen() {
       const resp = await fetch(asset.uri);
       const blob = await resp.blob();
 
-      // deterministic key (latest always overwrites)
-      const newPath = `avatars/${user.uid}/avatar.jpg`;
+      const newPath = `avatars/${user.uid}/avatar.jpg`; // deterministic (overwrite)
       const storageRef = ref(storage, newPath);
 
       await uploadBytes(storageRef, blob, {
@@ -253,6 +276,7 @@ export default function ProfileScreen() {
 
       setPhotoURL(url);
       setPhotoPath(newPath);
+      setPhotoVersion(Date.now());
 
       Alert.alert("Updated", "Your profile picture has been updated.");
     } catch (err: any) {
@@ -276,7 +300,6 @@ export default function ProfileScreen() {
           try {
             const userRef = doc(db, "users", user.uid);
 
-            // Clear Firestore fields
             await setDoc(
               userRef,
               {
@@ -287,16 +310,13 @@ export default function ProfileScreen() {
               { merge: true }
             );
 
-            // Best-effort delete from Storage
             const path = photoPath || `avatars/${user.uid}/avatar.jpg`;
             try {
               await deleteObject(ref(storage, path));
             } catch (e) {
-              // ok if it doesn't exist
               console.warn("Avatar delete failed (ok)", e);
             }
 
-            // Best-effort clear Auth photoURL
             try {
               await updateProfile(user, { photoURL: null });
             } catch (e) {
@@ -305,6 +325,7 @@ export default function ProfileScreen() {
 
             setPhotoURL(null);
             setPhotoPath(null);
+            setPhotoVersion(Date.now());
           } catch (e) {
             console.error("Remove photo failed", e);
             Alert.alert("Error", "Could not remove photo.");
@@ -319,8 +340,8 @@ export default function ProfileScreen() {
   if (!user) {
     return (
       <SafeAreaView style={styles.safe} edges={["top"]}>
-        <View style={styles.container}>
-          <Text>You’re not signed in.</Text>
+        <View style={[styles.screen, styles.center]}>
+          <Text style={{ color: "white", fontWeight: "800" }}>You’re not signed in.</Text>
         </View>
       </SafeAreaView>
     );
@@ -329,9 +350,11 @@ export default function ProfileScreen() {
   if (loading) {
     return (
       <SafeAreaView style={styles.safe} edges={["top"]}>
-        <View style={[styles.container, { alignItems: "center", justifyContent: "center" }]}>
-          <ActivityIndicator />
-          <Text style={{ marginTop: 10 }}>Loading profile…</Text>
+        <View style={[styles.screen, styles.center]}>
+          <ActivityIndicator color="white" />
+          <Text style={{ marginTop: 10, color: "rgba(255,255,255,0.75)", fontWeight: "800" }}>
+            Loading profile…
+          </Text>
         </View>
       </SafeAreaView>
     );
@@ -345,189 +368,322 @@ export default function ProfileScreen() {
       : teamId
     : "Not in a team yet";
 
+  const avatarUri = photoURL ? withCacheBuster(photoURL, photoVersion) : null;
+
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <ScrollView
-        contentContainerStyle={styles.container}
-        keyboardShouldPersistTaps="handled"
-      >
-        <Text style={styles.header}>Your Profile</Text>
+      <View style={styles.screen}>
+        <View style={styles.bg} />
 
-        <View style={styles.avatarRow}>
-          <View style={styles.avatarWrap}>
-            {photoURL ? (
-              <Image source={{ uri: photoURL }} style={styles.avatar} />
-            ) : (
-              <View style={[styles.avatar, styles.avatarFallback]}>
-                <Text style={styles.avatarInitials}>{initials}</Text>
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        >
+          <ScrollView
+            contentContainerStyle={styles.container}
+            keyboardShouldPersistTaps="handled"
+          >
+            {/* Hero */}
+            <View style={styles.hero}>
+              <View style={styles.logoWrap}>
+                <Image source={LOGO} style={styles.logo} contentFit="contain" />
               </View>
-            )}
-          </View>
 
-          <View style={{ flex: 1 }}>
-            <Text style={styles.bigName}>{displayName || initials}</Text>
-            <Text style={styles.subText}>{user.email}</Text>
+              <Text style={styles.heroTitle}>Your Profile</Text>
+              <Text style={styles.heroSub}>
+                Set your name + photo so your squad recognizes you.
+              </Text>
+            </View>
 
-            <View style={{ height: 10 }} />
+            {/* Main Card */}
+            <View style={styles.card}>
+              {/* Avatar + info row */}
+              <View style={styles.avatarRow}>
+                <View style={styles.avatarWrap}>
+                  {avatarUri ? (
+                    <Image source={{ uri: avatarUri }} style={styles.avatar} contentFit="cover" />
+                  ) : (
+                    <View style={[styles.avatar, styles.avatarFallback]}>
+                      <Text style={styles.avatarInitials}>{initials}</Text>
+                    </View>
+                  )}
+                </View>
 
-            <View style={{ flexDirection: "row", gap: 10, flexWrap: "wrap" }}>
-              <Pressable
-                onPress={handlePickPhoto}
-                style={({ pressed }) => [
-                  styles.photoButton,
-                  pressed && { opacity: 0.8 },
-                  uploadingPhoto && { opacity: 0.6 },
-                ]}
-                disabled={uploadingPhoto}
-              >
-                {uploadingPhoto ? (
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                    <ActivityIndicator />
-                    <Text style={styles.photoButtonText}>Working…</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.bigName}>{displayName || initials}</Text>
+                  <Text style={styles.subText}>{user.email}</Text>
+
+                  <View style={{ height: 10 }} />
+
+                  <View style={{ flexDirection: "row", gap: 10, flexWrap: "wrap" }}>
+                    <Pressable
+                      onPress={handlePickPhoto}
+                      disabled={uploadingPhoto || saving}
+                      style={({ pressed }) => [
+                        styles.secondaryBtnSm,
+                        (uploadingPhoto || saving) && { opacity: 0.65 },
+                        pressed && !(uploadingPhoto || saving) && { transform: [{ scale: 0.99 }] },
+                      ]}
+                    >
+                      {uploadingPhoto ? (
+                        <ActivityIndicator color="white" />
+                      ) : (
+                        <Text style={styles.secondaryBtnSmText}>
+                          {photoURL ? "Change photo" : "Add photo"}
+                        </Text>
+                      )}
+                    </Pressable>
+
+                    {!!photoURL && (
+                      <Pressable
+                        onPress={handleRemovePhoto}
+                        disabled={uploadingPhoto || saving}
+                        style={({ pressed }) => [
+                          styles.dangerBtnSm,
+                          (uploadingPhoto || saving) && { opacity: 0.65 },
+                          pressed && !(uploadingPhoto || saving) && { transform: [{ scale: 0.99 }] },
+                        ]}
+                      >
+                        <Text style={styles.dangerBtnSmText}>Remove</Text>
+                      </Pressable>
+                    )}
                   </View>
-                ) : (
-                  <Text style={styles.photoButtonText}>
-                    {photoURL ? "Change photo" : "Add photo"}
-                  </Text>
-                )}
-              </Pressable>
 
-              {!!photoURL && (
+                  <Text style={styles.tip}>Tip: square photos look best.</Text>
+                </View>
+              </View>
+
+              {/* Name edit */}
+              <Text style={[styles.label, { marginTop: 16 }]}>Display name</Text>
+              <View style={styles.inputRow}>
+                <Text style={styles.icon}>👤</Text>
+                <TextInput
+                  style={styles.input}
+                  value={displayName}
+                  onChangeText={setDisplayName}
+                  placeholder="How should teammates see you?"
+                  placeholderTextColor="rgba(255,255,255,0.35)"
+                  editable={!saving && !uploadingPhoto}
+                  autoCapitalize="words"
+                  returnKeyType="done"
+                />
+              </View>
+
+              {/* Actions */}
+              <View style={styles.btnRow}>
                 <Pressable
-                  onPress={handleRemovePhoto}
+                  onPress={handleSave}
+                  disabled={!canSave}
                   style={({ pressed }) => [
-                    styles.removeButton,
-                    pressed && { opacity: 0.8 },
-                    uploadingPhoto && { opacity: 0.6 },
+                    styles.primaryBtn,
+                    !canSave && styles.primaryBtnDisabled,
+                    pressed && canSave && { transform: [{ scale: 0.99 }] },
                   ]}
-                  disabled={uploadingPhoto}
                 >
-                  <Text style={styles.removeButtonText}>Remove</Text>
+                  {saving ? (
+                    <ActivityIndicator color="#04130f" />
+                  ) : (
+                    <Text style={styles.primaryBtnText}>Save profile</Text>
+                  )}
                 </Pressable>
+
+                <Pressable
+                  onPress={handleCancelNameEdit}
+                  disabled={!isNameDirty || saving || uploadingPhoto}
+                  style={({ pressed }) => [
+                    styles.ghostBtn,
+                    (!isNameDirty || saving || uploadingPhoto) && { opacity: 0.6 },
+                    pressed && isNameDirty && !(saving || uploadingPhoto) && {
+                      transform: [{ scale: 0.99 }],
+                    },
+                  ]}
+                >
+                  <Text style={styles.ghostBtnText}>Cancel</Text>
+                </Pressable>
+              </View>
+
+              {/* Team */}
+              <View style={styles.divider} />
+              <Text style={styles.sectionLabel}>Current team</Text>
+              <Text style={styles.sectionValue}>{effectiveTeamLabel}</Text>
+              {!!teamId && !!teamName && (
+                <Text style={styles.teamSubtle}>Code: {teamId}</Text>
               )}
             </View>
 
-            <Text style={styles.helperText}>Tip: square photos look best.</Text>
-          </View>
-        </View>
+            {/* Sign out */}
+            <Pressable
+              onPress={signOut}
+              style={({ pressed }) => [
+                styles.signOutBtn,
+                pressed && { transform: [{ scale: 0.99 }] },
+              ]}
+            >
+              <Text style={styles.signOutText}>Sign out</Text>
+            </Pressable>
 
-        <View style={styles.card}>
-          <Text style={styles.label}>Display name</Text>
-          <TextInput
-            style={styles.input}
-            value={displayName}
-            onChangeText={setDisplayName}
-            placeholder="How should teammates see you?"
-            editable={!saving && !uploadingPhoto}
-          />
-
-          <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
-            <View style={{ flex: 1 }}>
-              <Button
-                title={saving ? "Saving…" : "Save profile"}
-                onPress={handleSave}
-                disabled={!isNameDirty || saving || uploadingPhoto}
-              />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Button
-                title="Cancel"
-                color="#777"
-                onPress={handleCancelNameEdit}
-                disabled={!isNameDirty || saving || uploadingPhoto}
-              />
-            </View>
-          </View>
-
-          <Text style={styles.label}>Current team</Text>
-          <Text style={styles.value}>{effectiveTeamLabel}</Text>
-          {!!teamId && !!teamName && (
-            <Text style={styles.teamSubtle}>Code: {teamId}</Text>
-          )}
-        </View>
-
-        <View style={{ height: 20 }} />
-        <Button title="Sign out" color="#d11" onPress={signOut} />
-        <View style={{ height: 40 }} />
-      </ScrollView>
+            <Text style={styles.footer}>⚽ Keep it updated for easier invites + RSVPs.</Text>
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </View>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1 },
-  container: { padding: 20 },
-  header: {
-    fontSize: 22,
+  safe: { flex: 1, backgroundColor: "#052b22" },
+
+  screen: { flex: 1, backgroundColor: "#052b22" },
+  bg: { ...StyleSheet.absoluteFillObject, backgroundColor: "#052b22" },
+
+  center: { alignItems: "center", justifyContent: "center" },
+
+  container: {
+    paddingHorizontal: 18,
+    paddingTop: 18,
+    paddingBottom: 40,
+  },
+
+  hero: { alignItems: "center", marginBottom: 14 },
+  logoWrap: { width: 140, height: 90, marginBottom: 8 },
+  logo: { width: "100%", height: "100%" },
+
+  heroTitle: { fontSize: 34, fontWeight: "900", color: "white" },
+  heroSub: {
+    marginTop: 8,
+    fontSize: 15,
     fontWeight: "700",
-    marginBottom: 18,
+    color: "rgba(255,255,255,0.7)",
     textAlign: "center",
+    lineHeight: 20,
+    maxWidth: 340,
   },
-  avatarRow: {
-    flexDirection: "row",
-    gap: 14,
-    alignItems: "center",
-    marginBottom: 18,
+
+  card: {
+    marginTop: 6,
+    borderRadius: 22,
+    padding: 18,
+    backgroundColor: "rgba(10, 16, 25, 0.78)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
   },
+
+  avatarRow: { flexDirection: "row", gap: 14, alignItems: "center" },
+
   avatarWrap: {
     width: 86,
     height: 86,
     borderRadius: 43,
     overflow: "hidden",
     borderWidth: 1,
-    borderColor: "#ddd",
+    borderColor: "rgba(255,255,255,0.18)",
   },
-  avatar: { width: 86, height: 86, borderRadius: 43 },
+  avatar: { width: "100%", height: "100%" },
   avatarFallback: {
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#eef3ff",
+    backgroundColor: "rgba(255,255,255,0.08)",
   },
-  avatarInitials: { fontSize: 26, fontWeight: "800", color: "#2b4cff" },
-  bigName: { fontSize: 18, fontWeight: "700" },
-  subText: { marginTop: 2, color: "#666" },
+  avatarInitials: { fontSize: 26, fontWeight: "900", color: "white" },
 
-  photoButton: {
+  bigName: { fontSize: 18, fontWeight: "900", color: "white" },
+  subText: { marginTop: 2, color: "rgba(255,255,255,0.65)", fontWeight: "700" },
+
+  secondaryBtnSm: {
     alignSelf: "flex-start",
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 10,
+    height: 40,
+    paddingHorizontal: 14,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.10)",
     borderWidth: 1,
-    borderColor: "#cfd7ff",
-    backgroundColor: "#f3f6ff",
+    borderColor: "rgba(255,255,255,0.14)",
   },
-  photoButtonText: { fontWeight: "700", color: "#2b4cff" },
+  secondaryBtnSmText: { color: "white", fontWeight: "900" },
 
-  removeButton: {
+  dangerBtnSm: {
     alignSelf: "flex-start",
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 10,
+    height: 40,
+    paddingHorizontal: 14,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,107,107,0.12)",
     borderWidth: 1,
-    borderColor: "#ffd0d0",
-    backgroundColor: "#fff5f5",
+    borderColor: "rgba(255,107,107,0.30)",
   },
-  removeButtonText: { fontWeight: "800", color: "#b00020" },
+  dangerBtnSmText: { color: "#ff8f8f", fontWeight: "900" },
 
-  helperText: { marginTop: 8, color: "#777", fontSize: 12 },
-
-  card: {
-    padding: 14,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#ddd",
-    backgroundColor: "#fff",
+  tip: {
+    marginTop: 8,
+    color: "rgba(255,255,255,0.5)",
+    fontSize: 12,
+    fontWeight: "700",
   },
-  label: { marginTop: 10, fontSize: 13, color: "#666" },
-  value: { fontSize: 16, marginTop: 6, fontWeight: "700" },
-  teamSubtle: { marginTop: 4, color: "#666", fontSize: 12 },
 
-  input: {
+  label: {
+    fontSize: 16,
+    fontWeight: "800",
+    color: "rgba(255,255,255,0.78)",
+    marginBottom: 8,
+  },
+
+  inputRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    height: 54,
+    backgroundColor: "rgba(255,255,255,0.06)",
     borderWidth: 1,
-    borderColor: "#ccc",
-    borderRadius: 10,
-    paddingHorizontal: 10,
-    paddingVertical: 10,
-    marginTop: 6,
+    borderColor: "rgba(255,255,255,0.10)",
+  },
+  icon: { fontSize: 18, marginRight: 10, opacity: 0.9 },
+  input: { flex: 1, color: "white", fontSize: 16, fontWeight: "700" },
+
+  btnRow: { marginTop: 16, gap: 10 },
+
+  primaryBtn: {
+    height: 54,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#1b7f5a",
+  },
+  primaryBtnDisabled: { opacity: 0.55 },
+  primaryBtnText: { color: "#04130f", fontSize: 18, fontWeight: "900" },
+
+  ghostBtn: {
+    height: 50,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+  },
+  ghostBtnText: { color: "rgba(255,255,255,0.85)", fontSize: 16, fontWeight: "900" },
+
+  divider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: "rgba(255,255,255,0.12)",
+    marginTop: 18,
+    marginBottom: 14,
+  },
+
+  sectionLabel: { color: "rgba(255,255,255,0.70)", fontWeight: "800" },
+  sectionValue: { marginTop: 6, color: "white", fontWeight: "900", fontSize: 18 },
+  teamSubtle: { marginTop: 4, color: "rgba(255,255,255,0.55)", fontSize: 12, fontWeight: "700" },
+
+  signOutBtn: { marginTop: 18, alignItems: "center", justifyContent: "center" },
+  signOutText: { color: "#ff6b6b", fontWeight: "900", fontSize: 18 },
+
+  footer: {
+    marginTop: 16,
+    textAlign: "center",
+    color: "rgba(255,255,255,0.55)",
+    fontSize: 14,
+    fontWeight: "700",
   },
 });

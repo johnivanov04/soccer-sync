@@ -1,6 +1,14 @@
 // app/(app)/(tabs)/_layout.tsx
 import { Tabs } from "expo-router";
-import { collection, doc, orderBy, query, where, type DocumentData, type QueryDocumentSnapshot } from "firebase/firestore";
+import {
+  collection,
+  doc,
+  orderBy,
+  query,
+  where,
+  type DocumentData,
+  type QueryDocumentSnapshot,
+} from "firebase/firestore";
 import React, { useEffect, useMemo, useState } from "react";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
@@ -41,7 +49,7 @@ export default function AppTabsLayout() {
   const [matches, setMatches] = useState<MatchMini[]>([]);
   const [readByMatchId, setReadByMatchId] = useState<Record<string, ChatReadMini>>({});
 
-  // ✅ NEW: mute prefs keyed by matchId
+  // ✅ mute prefs keyed by matchId
   const [prefByMatchId, setPrefByMatchId] = useState<Record<string, ChatPrefMini>>({});
 
   // teamId
@@ -82,7 +90,11 @@ export default function AppTabsLayout() {
     }
 
     const matchesCol = collection(db, "matches");
-    const q = query(matchesCol, where("teamId", "==", teamId), orderBy("startDateTime", "asc"));
+    const q = query(
+      matchesCol,
+      where("teamId", "==", teamId),
+      orderBy("startDateTime", "asc")
+    );
 
     const unsub = onSnapshotSafe(
       q,
@@ -140,7 +152,7 @@ export default function AppTabsLayout() {
     return () => unsub();
   }, [user?.uid]);
 
-  // ✅ NEW: chatPrefs (mute)
+  // chatPrefs (mute)
   useEffect(() => {
     if (!user?.uid) {
       setPrefByMatchId({});
@@ -196,7 +208,7 @@ export default function AppTabsLayout() {
         continue;
       }
 
-      // ✅ Fallback (legacy threads without seq): counts 1 per unread thread
+      // ✅ Fallback: counts 1 per unread thread
       const lastMsgAt = toDateOrNull(m.lastMessageAt);
       if (!lastMsgAt) continue;
 
@@ -211,7 +223,31 @@ export default function AppTabsLayout() {
   const badge = unreadCount > 0 ? (unreadCount > 99 ? "99+" : unreadCount) : undefined;
 
   return (
-    <Tabs screenOptions={{ headerTitleAlign: "center" }}>
+    <Tabs
+      screenOptions={{
+        headerTitleAlign: "center",
+
+        // ✅ Dark header to match app theme
+        headerStyle: { backgroundColor: "#052b22" },
+        headerTintColor: "white",
+        headerTitleStyle: { fontWeight: "900" },
+
+        // ✅ Dark tab bar
+        tabBarStyle: {
+          backgroundColor: "#041f19",
+          borderTopColor: "rgba(255,255,255,0.10)",
+        },
+        tabBarActiveTintColor: "#8ff0c9",
+        tabBarInactiveTintColor: "rgba(255,255,255,0.60)",
+
+        // Badge styling
+        tabBarBadgeStyle: {
+          backgroundColor: "#1b7f5a",
+          color: "#04130f",
+          fontWeight: "900",
+        },
+      }}
+    >
       <Tabs.Screen
         name="matches"
         options={{
