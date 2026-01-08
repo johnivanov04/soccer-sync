@@ -24,10 +24,9 @@ export default function VerifyEmailScreen() {
   const [checking, setChecking] = useState(false);
 
   const email = user?.email ?? "";
-
   const verified = !!user?.emailVerified;
 
-  const canResend = useMemo(() => !sending && !checking, [sending, checking]);
+  const canResend = useMemo(() => !!user && !sending && !checking, [user, sending, checking]);
 
   const handleResend = async () => {
     try {
@@ -48,11 +47,10 @@ export default function VerifyEmailScreen() {
       setChecking(true);
       await refreshUser();
 
-      // If it updated, RootNavigation will route you into the app automatically.
-      // But if you want to force it:
-      // router.replace("/(app)/(tabs)/matches");
-      if (!user?.emailVerified) {
-        // NOTE: user state updates async; this is just a friendly message
+      // If verified now, go to app.
+      // (Your app/_layout gate will also handle this, but this makes it immediate.)
+      if (user?.emailVerified) {
+        router.replace("/(app)/(tabs)/matches");
       }
     } catch (e: any) {
       console.error(e);
@@ -92,11 +90,11 @@ export default function VerifyEmailScreen() {
 
           <Pressable
             onPress={handleIVerified}
-            disabled={checking}
+            disabled={!user || checking}
             style={({ pressed }) => [
               styles.primaryBtn,
-              pressed && !checking && { transform: [{ scale: 0.99 }] },
-              checking && { opacity: 0.75 },
+              pressed && user && !checking && { transform: [{ scale: 0.99 }] },
+              (!user || checking) && { opacity: 0.75 },
             ]}
           >
             {checking ? (

@@ -27,10 +27,12 @@ interface AuthContextValue {
   signUp: (email: string, password: string, displayName?: string) => Promise<void>;
   signOut: () => Promise<void>;
 
-  // ✅ Option 1 additions
-  resetPassword: (email: string) => Promise<void>;
+  // ✅ Email verification
   sendVerificationEmail: () => Promise<void>;
   refreshUser: () => Promise<void>;
+
+  // ✅ Forgot password
+  resetPassword: (email: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -112,49 +114,48 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       }
     }
 
-    const userRef = doc(db, "users", fbUser.uid);
+    // ✅ send verification email on signup (don’t block if it fails)
+    try {
+      await sendEmailVerification(fbUser);
+    } catch (err) {
+      console.warn("Could not send verification email", err);
+    }
 
+    const userRef = doc(db, "users", fbUser.uid);
     await setDoc(
       userRef,
       {
         email: fbUser.email ?? email,
         ...(displayName && displayName.trim() ? { displayName: displayName.trim() } : {}),
         createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
       },
       { merge: true }
     );
-
-    // ✅ Send verification email on signup (non-blocking, but we await so user sees errors)
-    try {
-      await sendEmailVerification(fbUser);
-    } catch (e) {
-      console.warn("Could not send verification email", e);
-      // we won't throw: user can resend from the verify screen
-    }
   };
 
   const signOut = async () => {
     await fbSignOut(auth);
   };
 
-  // ✅ Option 1 additions
-  const resetPassword = async (email: string) => {
-    const mail = String(email ?? "").trim();
-    if (!mail) throw new Error("Enter your email first.");
-    await sendPasswordResetEmail(auth, mail);
-  };
-
-  const sendVerificationEmail = async () => {
+  const sendVerificationEmailFn = async () => {
     const u = auth.currentUser;
     if (!u) throw new Error("Not signed in.");
     await sendEmailVerification(u);
   };
 
-  const refreshUser = async () => {
+  const refreshUserFn = async () => {
     const u = auth.currentUser;
-    if (!u) return;
+    if (!u) throw new Error("Not signed in.");
     await reload(u);
+    // reload() sometimes doesn't fire onAuthStateChanged; update state manually
     setUser(auth.currentUser);
+  };
+
+  const resetPasswordFn = async (email: string) => {
+    const mail = email.trim();
+    if (!mail) throw new Error("Please enter an email.");
+    await sendPasswordResetEmail(auth, mail);
   };
 
   return (
@@ -165,9 +166,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         signIn,
         signUp,
         signOut,
-        resetPassword,
-        sendVerificationEmail,
-        refreshUser,
+        sendVerificationEmail: sendVerificationEmailFn,
+        refreshUser: refreshUserFn,
+        resetPassword: resetPasswordFn,
       }}
     >
       {children}

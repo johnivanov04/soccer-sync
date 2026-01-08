@@ -1,44 +1,48 @@
-// app/(auth)/sign-in.tsx
+// app/(auth)/forgot-password.tsx
 import { Image } from "expo-image";
 import { useRouter } from "expo-router";
 import React, { useMemo, useState } from "react";
 import {
-  ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
-  Pressable,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
+    ActivityIndicator,
+    KeyboardAvoidingView,
+    Platform,
+    Pressable,
+    StyleSheet,
+    Text,
+    TextInput,
+    View,
 } from "react-native";
 import { useAuth } from "../../src/context/AuthContext";
 
-// ✅ put your file here: assets/images/pickupsoccerlogo.png
 const LOGO = require("../../assets/images/pickupsoccerlogo.png");
 
-export default function SignInScreen() {
+export default function ForgotPasswordScreen() {
   const router = useRouter();
-  const { signIn } = useAuth();
+  const { resetPassword } = useAuth();
 
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const canSubmit = useMemo(() => {
-    return email.trim().length > 0 && password.length > 0 && !loading;
-  }, [email, password, loading]);
+  const [error, setError] = useState("");
+  const [sent, setSent] = useState(false);
 
-  const handleSignIn = async () => {
+  const canSubmit = useMemo(() => {
+    return email.trim().length > 0 && !loading;
+  }, [email, loading]);
+
+  const handleSend = async () => {
     try {
       setError("");
+      setSent(false);
       setLoading(true);
-      await signIn(email.trim(), password);
-      router.replace("/(app)/(tabs)/matches");
+
+      await resetPassword(email.trim());
+
+      // Security-friendly UX: show success regardless of whether email exists
+      setSent(true);
     } catch (e: any) {
       console.error(e);
-      setError(e?.message || "Could not sign in");
+      setError(e?.message || "Could not send reset email.");
     } finally {
       setLoading(false);
     }
@@ -57,12 +61,17 @@ export default function SignInScreen() {
             <Image source={LOGO} style={styles.logo} contentFit="contain" />
           </View>
 
-          <Text style={styles.title}>SoccerSync</Text>
-          <Text style={styles.subtitle}>Organize matches. Sync your squad.</Text>
+          <Text style={styles.title}>Reset password</Text>
+          <Text style={styles.subtitle}>We’ll email you a link to set a new password.</Text>
         </View>
 
         <View style={styles.card}>
           {!!error && <Text style={styles.error}>{error}</Text>}
+          {sent && (
+            <Text style={styles.success}>
+              If an account exists for that email, we sent a reset link. Check your inbox (and spam).
+            </Text>
+          )}
 
           <Text style={styles.label}>Email</Text>
           <View style={styles.inputRow}>
@@ -76,39 +85,15 @@ export default function SignInScreen() {
               value={email}
               onChangeText={setEmail}
               editable={!loading}
-              returnKeyType="next"
-            />
-          </View>
-
-          <Text style={[styles.label, { marginTop: 14 }]}>Password</Text>
-          <View style={styles.inputRow}>
-            <Text style={styles.icon}>🔒</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="••••••••"
-              placeholderTextColor="rgba(255,255,255,0.35)"
-              secureTextEntry
-              value={password}
-              onChangeText={setPassword}
-              editable={!loading}
-              returnKeyType="done"
+              returnKeyType="send"
               onSubmitEditing={() => {
-                if (canSubmit) void handleSignIn();
+                if (canSubmit) void handleSend();
               }}
             />
           </View>
 
-          {/* ✅ Forgot password goes to its own page */}
           <Pressable
-            onPress={() => router.push("/(auth)/forgot-password")}
-            disabled={loading}
-            style={({ pressed }) => [{ marginTop: 10, alignSelf: "flex-end" }, pressed && { opacity: 0.85 }]}
-          >
-            <Text style={styles.forgotLink}>Forgot password?</Text>
-          </Pressable>
-
-          <Pressable
-            onPress={handleSignIn}
+            onPress={handleSend}
             disabled={!canSubmit}
             style={({ pressed }) => [
               styles.primaryBtn,
@@ -119,18 +104,18 @@ export default function SignInScreen() {
             {loading ? (
               <ActivityIndicator color="#04130f" />
             ) : (
-              <Text style={styles.primaryBtnText}>Sign In</Text>
+              <Text style={styles.primaryBtnText}>Send reset link</Text>
             )}
           </Pressable>
 
-          <Pressable onPress={() => router.push("/(auth)/sign-up")} disabled={loading}>
+          <Pressable onPress={() => router.back()} disabled={loading}>
             <Text style={styles.link}>
-              Don’t have an account? <Text style={styles.linkStrong}>Sign up</Text>
+              Back to <Text style={styles.linkStrong}>Sign in</Text>
             </Text>
           </Pressable>
         </View>
 
-        <Text style={styles.footer}>⚽ Built for pickup runs and real schedules.</Text>
+        <Text style={styles.footer}>⚽ Get back on the pitch.</Text>
       </KeyboardAvoidingView>
     </View>
   );
@@ -143,16 +128,16 @@ const styles = StyleSheet.create({
   container: { flex: 1, paddingHorizontal: 18, justifyContent: "center" },
 
   hero: { alignItems: "center", marginBottom: 16 },
-
   logoWrap: { width: 180, height: 120, marginBottom: 10 },
   logo: { width: "100%", height: "100%" },
 
-  title: { fontSize: 44, fontWeight: "900", color: "white", letterSpacing: 0.2 },
+  title: { fontSize: 32, fontWeight: "900", color: "white", letterSpacing: 0.2 },
   subtitle: {
     marginTop: 6,
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: "700",
     color: "rgba(255,255,255,0.7)",
+    textAlign: "center",
   },
 
   card: {
@@ -184,14 +169,8 @@ const styles = StyleSheet.create({
   icon: { fontSize: 18, marginRight: 10, opacity: 0.85 },
   input: { flex: 1, color: "white", fontSize: 16, fontWeight: "700" },
 
-  forgotLink: {
-    color: "rgba(255,255,255,0.75)",
-    fontWeight: "800",
-    fontSize: 14,
-  },
-
   primaryBtn: {
-    marginTop: 14,
+    marginTop: 18,
     height: 54,
     borderRadius: 18,
     alignItems: "center",
@@ -202,6 +181,13 @@ const styles = StyleSheet.create({
   primaryBtnText: { color: "#04130f", fontSize: 18, fontWeight: "900" },
 
   error: { color: "#ffb4b4", marginBottom: 10, fontWeight: "800", textAlign: "center" },
+  success: {
+    color: "rgba(180,255,205,0.9)",
+    marginBottom: 10,
+    fontWeight: "800",
+    textAlign: "center",
+    lineHeight: 18,
+  },
 
   link: {
     marginTop: 16,
