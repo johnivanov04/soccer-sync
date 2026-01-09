@@ -1,8 +1,24 @@
 // app/(app)/(tabs)/matches.tsx
 import { useRouter } from "expo-router";
-import { collection, doc, orderBy, query, where, type DocumentData, type QueryDocumentSnapshot } from "firebase/firestore";
+import {
+  collection,
+  doc,
+  orderBy,
+  query,
+  where,
+  type DocumentData,
+  type QueryDocumentSnapshot,
+} from "firebase/firestore";
 import React, { useEffect, useMemo, useState } from "react";
-import { Button, FlatList, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import {
+  FlatList,
+  Pressable,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
 import { onSnapshotSafe } from "../../../src/firestoreSafe";
@@ -168,6 +184,54 @@ function formatPreviewTimeFromDate(d: Date | null): string {
     : d.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
+function PrimaryButton({
+  title,
+  onPress,
+  disabled,
+}: {
+  title: string;
+  onPress: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={!!disabled}
+      style={({ pressed }) => [
+        styles.primaryBtn,
+        disabled && styles.primaryBtnDisabled,
+        pressed && !disabled && { transform: [{ scale: 0.99 }] },
+      ]}
+    >
+      <Text style={styles.primaryBtnText}>{title}</Text>
+    </Pressable>
+  );
+}
+
+function SecondaryButton({
+  title,
+  onPress,
+  disabled,
+}: {
+  title: string;
+  onPress: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={!!disabled}
+      style={({ pressed }) => [
+        styles.secondaryBtn,
+        disabled && styles.primaryBtnDisabled,
+        pressed && !disabled && { transform: [{ scale: 0.99 }] },
+      ]}
+    >
+      <Text style={styles.secondaryBtnText}>{title}</Text>
+    </Pressable>
+  );
+}
+
 export default function MatchesScreen() {
   const router = useRouter();
   const { user } = useAuth();
@@ -203,7 +267,6 @@ export default function MatchesScreen() {
         setActiveMembership(active);
         setTeamId(active?.teamId ?? null);
         setTeamName(active?.teamName ?? null);
-
         setTeamLoading(false);
       },
       {
@@ -244,9 +307,7 @@ export default function MatchesScreen() {
       },
       {
         label: "matches:teamDoc",
-        onPermissionDenied: () => {
-          // during transitions this can happen; keep UI stable but don't crash
-        },
+        onPermissionDenied: () => {},
       }
     );
 
@@ -285,7 +346,7 @@ export default function MatchesScreen() {
     return () => unsub();
   }, [teamId, !!activeMembership]);
 
-  // 4) Subscribe to MY RSVPs (always allowed for own docs)
+  // 4) Subscribe to MY RSVPs
   useEffect(() => {
     if (!user?.uid) {
       setMyRsvpByMatchId({});
@@ -321,7 +382,7 @@ export default function MatchesScreen() {
     return () => unsub();
   }, [user?.uid]);
 
-  // 5) Subscribe to chatReads (always allowed for own subcollection)
+  // 5) Subscribe to chatReads
   useEffect(() => {
     if (!user?.uid) {
       setLastReadByMatchId({});
@@ -379,6 +440,31 @@ export default function MatchesScreen() {
 
     return copy;
   }, [matches]);
+
+  const header = () => {
+    if (!teamId || !activeMembership) return null;
+
+    return (
+      <View style={{ paddingTop: 6, paddingBottom: 10 }}>
+        <Text style={styles.heroTitle}>Matches</Text>
+        <Text style={styles.heroSub}>
+          Schedule games, track RSVPs, and keep the chat flowing.
+        </Text>
+
+        <View style={styles.pillRow}>
+          <View style={styles.teamPill}>
+            <Text style={styles.teamPillText}>Team: {teamName ?? teamId}</Text>
+          </View>
+        </View>
+
+        <View style={{ marginTop: 12 }}>
+          <PrimaryButton title="Create Match" onPress={() => router.push("/(app)/match/create")} />
+        </View>
+
+        <Text style={styles.sectionTitle}>Upcoming & recent</Text>
+      </View>
+    );
+  };
 
   const renderItem = ({ item }: { item: Match }) => {
     const date = toDate(item.startDateTime);
@@ -438,9 +524,10 @@ export default function MatchesScreen() {
             params: { matchId: item.id },
           })
         }
+        activeOpacity={0.92}
       >
         <View style={styles.cardTopRow}>
-          <Text style={styles.title}>
+          <Text style={styles.cardTitle}>
             {date.toLocaleDateString()}{" "}
             {date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
           </Text>
@@ -482,7 +569,7 @@ export default function MatchesScreen() {
         )}
 
         <View style={styles.metaRow}>
-          <Text style={styles.subtitle}>
+          <Text style={styles.metaText}>
             {confirmed}/{max || "?"} going
           </Text>
 
@@ -500,70 +587,193 @@ export default function MatchesScreen() {
     );
   };
 
+  // ---- States ----
   if (teamLoading) {
     return (
-      <View style={styles.container}>
-        <Text>Loading your team…</Text>
-      </View>
+      <SafeAreaView style={styles.safe} edges={["left", "right", "bottom"]}>
+        <View style={styles.screen}>
+          <View style={styles.bg} />
+          <View style={styles.pitchBlobs} />
+          <View style={styles.centerWrap}>
+            <View style={styles.glassNotice}>
+              <Text style={styles.noticeTitle}>Loading…</Text>
+              <Text style={styles.noticeSub}>Getting your team + matches.</Text>
+            </View>
+          </View>
+        </View>
+      </SafeAreaView>
     );
   }
 
   if (!teamId || !activeMembership) {
     return (
-      <View style={styles.container}>
-        <Text style={styles.noTeamTitle}>You’re not on a team yet.</Text>
-        <Text style={styles.noTeamSub}>
-          Join or create a team in the Teams tab to see and create matches.
-        </Text>
-        <Button title="Go to Teams" onPress={() => router.push("/(app)/(tabs)/teams")} />
-      </View>
+      <SafeAreaView style={styles.safe} edges={["left", "right", "bottom"]}>
+        <View style={styles.screen}>
+          <View style={styles.bg} />
+          <View style={styles.pitchBlobs} />
+
+          <View style={[styles.centerWrap, { paddingHorizontal: 18 }]}>
+            <Text style={styles.heroTitle}>Matches</Text>
+            <Text style={styles.heroSub}>
+              You need to join or create a team first.
+            </Text>
+
+            <View style={[styles.glassNotice, { marginTop: 14 }]}>
+              <Text style={styles.noticeTitle}>You’re not on a team yet.</Text>
+              <Text style={styles.noticeSub}>
+                Go to Teams to join with an invite code or create a new team.
+              </Text>
+
+              <View style={{ marginTop: 12 }}>
+                <PrimaryButton
+                  title="Go to Teams"
+                  onPress={() => router.push("/(app)/(tabs)/teams")}
+                />
+              </View>
+            </View>
+          </View>
+        </View>
+      </SafeAreaView>
     );
   }
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.teamTag}>Team: {teamName ?? teamId}</Text>
+    <SafeAreaView style={styles.safe} edges={["left", "right", "bottom"]}>
+      <View style={styles.screen}>
+        {/* Background layers */}
+        <View style={styles.bg} />
+        <View style={styles.pitchBlobs} />
 
-      <Button title="Create Match" onPress={() => router.push("/(app)/match/create")} />
-
-      <FlatList
-        data={sortedMatches}
-        keyExtractor={(item) => item.id}
-        renderItem={renderItem}
-        contentContainerStyle={{ paddingVertical: 12 }}
-      />
-
-      {sortedMatches.length === 0 && (
-        <Text style={{ marginTop: 16, textAlign: "center" }}>No matches yet. Create one!</Text>
-      )}
-    </View>
+        <FlatList
+          data={sortedMatches}
+          keyExtractor={(item) => item.id}
+          renderItem={renderItem}
+          ListHeaderComponent={header}
+          ListEmptyComponent={
+            <View style={{ marginTop: 6 }}>
+              <View style={styles.glassNotice}>
+                <Text style={styles.noticeTitle}>No matches yet.</Text>
+                <Text style={styles.noticeSub}>Create one and invite your squad.</Text>
+                <View style={{ marginTop: 12 }}>
+                  <SecondaryButton
+                    title="Create your first match"
+                    onPress={() => router.push("/(app)/match/create")}
+                  />
+                </View>
+              </View>
+            </View>
+          }
+          contentContainerStyle={styles.listContent}
+          showsVerticalScrollIndicator={false}
+        />
+      </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 16 },
+  // Safe area
+  safe: { flex: 1, backgroundColor: "#052b22" },
 
-  teamTag: {
-    marginBottom: 10,
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-    backgroundColor: "#E6F4FF",
-    borderRadius: 999,
-    alignSelf: "flex-start",
-    fontSize: 12,
-    fontWeight: "600",
+  // Screen
+  screen: { flex: 1, backgroundColor: "#052b22" },
+
+  // Background
+  bg: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "#052b22",
   },
 
-  card: {
-    padding: 12,
-    marginBottom: 10,
-    borderRadius: 10,
-    borderColor: "#ddd",
+  // soft “pitch blobs” (no center circle outline)
+  pitchBlobs: {
+    ...StyleSheet.absoluteFillObject,
+    opacity: 0.35,
+    backgroundColor: "transparent",
+  },
+
+  listContent: {
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 24,
+  },
+
+  // Hero
+  heroTitle: {
+    fontSize: 44,
+    fontWeight: "900",
+    color: "white",
+    letterSpacing: 0.2,
+  },
+  heroSub: {
+    marginTop: 6,
+    fontSize: 16,
+    fontWeight: "700",
+    color: "rgba(255,255,255,0.70)",
+    lineHeight: 20,
+  },
+  sectionTitle: {
+    marginTop: 18,
+    fontSize: 18,
+    fontWeight: "900",
+    color: "rgba(255,255,255,0.92)",
+  },
+
+  pillRow: { marginTop: 10, flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  teamPill: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.08)",
     borderWidth: 1,
-    backgroundColor: "#fff",
+    borderColor: "rgba(255,255,255,0.10)",
+    alignSelf: "flex-start",
+  },
+  teamPillText: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "rgba(255,255,255,0.80)",
+  },
+
+  // Buttons
+  primaryBtn: {
+    height: 54,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#1b7f5a",
+  },
+  primaryBtnDisabled: { opacity: 0.55 },
+  primaryBtnText: {
+    color: "#04130f",
+    fontSize: 18,
+    fontWeight: "900",
+  },
+  secondaryBtn: {
+    height: 54,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.10)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+  },
+  secondaryBtnText: {
+    color: "rgba(255,255,255,0.92)",
+    fontSize: 17,
+    fontWeight: "900",
+  },
+
+  // Cards
+  card: {
+    marginTop: 12,
+    padding: 14,
+    borderRadius: 18,
+    backgroundColor: "rgba(10, 16, 25, 0.78)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
   },
   cardUnread: {
-    borderColor: "#2b4cff",
+    borderColor: "rgba(43, 76, 255, 0.65)",
   },
 
   cardTopRow: {
@@ -571,6 +781,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     gap: 10,
+  },
+  cardTitle: {
+    flex: 1,
+    fontWeight: "900",
+    color: "white",
+    fontSize: 15,
   },
 
   topRight: {
@@ -583,81 +799,114 @@ const styles = StyleSheet.create({
     width: 10,
     height: 10,
     borderRadius: 999,
-    backgroundColor: "#2b4cff",
+    backgroundColor: "rgba(43, 76, 255, 0.95)",
   },
 
   unreadPill: {
     paddingVertical: 2,
     paddingHorizontal: 8,
     borderRadius: 999,
-    backgroundColor: "#2b4cff",
+    backgroundColor: "rgba(43, 76, 255, 0.95)",
   },
   unreadPillText: {
     color: "#fff",
     fontSize: 12,
-    fontWeight: "800",
+    fontWeight: "900",
   },
 
-  title: { fontWeight: "bold", flex: 1 },
-  startHint: { marginTop: 6, color: "#666" },
-  location: { marginTop: 6, color: "#555" },
+  startHint: { marginTop: 8, color: "rgba(255,255,255,0.65)", fontWeight: "700" },
+  location: { marginTop: 6, color: "rgba(255,255,255,0.78)", fontWeight: "700" },
+  desc: { marginTop: 6, color: "rgba(255,255,255,0.72)", lineHeight: 18, fontWeight: "600" },
 
-  desc: { marginTop: 6, color: "#444", lineHeight: 18 },
-
+  // Chat preview
   chatRow: {
-    marginTop: 8,
+    marginTop: 10,
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
   },
   chatPreview: {
     flex: 1,
-    color: "#222",
-    fontWeight: "600",
+    color: "rgba(255,255,255,0.92)",
+    fontWeight: "800",
   },
-  chatTime: { color: "#666", fontSize: 12, fontWeight: "600" },
-  chatEmpty: { marginTop: 8, color: "#777" },
+  chatTime: { color: "rgba(255,255,255,0.60)", fontSize: 12, fontWeight: "800" },
+  chatEmpty: { marginTop: 10, color: "rgba(255,255,255,0.55)", fontWeight: "700" },
 
+  // Meta row
   metaRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    marginTop: 10,
+    marginTop: 12,
     flexWrap: "wrap",
   },
-
-  subtitle: { color: "#777" },
+  metaText: { color: "rgba(255,255,255,0.65)", fontWeight: "800" },
+  waitlistText: { color: "rgba(255,231,184,0.95)", fontWeight: "900" },
 
   hostBadge: {
-    backgroundColor: "#FFF3CD",
-    paddingVertical: 3,
-    paddingHorizontal: 8,
+    backgroundColor: "rgba(255, 243, 205, 0.22)",
+    paddingVertical: 4,
+    paddingHorizontal: 10,
     borderRadius: 999,
     fontSize: 12,
-    fontWeight: "600",
+    fontWeight: "900",
+    color: "rgba(255,255,255,0.92)",
+    overflow: "hidden",
   },
 
-  waitlistText: { color: "#7a4d00" },
+  // Chips
+  chip: {
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+  },
+  chipText: { fontSize: 12, fontWeight: "900", color: "rgba(255,255,255,0.92)" },
 
-  chip: { paddingVertical: 4, paddingHorizontal: 10, borderRadius: 999 },
-  chipText: { fontSize: 12, fontWeight: "700" },
+  chip_ontrack: { backgroundColor: "rgba(27, 127, 90, 0.25)" },
+  chip_needs: { backgroundColor: "rgba(255,255,255,0.10)" },
+  chip_atrisk: { backgroundColor: "rgba(255, 120, 120, 0.18)" },
+  chip_cancelled: { backgroundColor: "rgba(255,255,255,0.08)" },
+  chip_played: { backgroundColor: "rgba(120, 180, 255, 0.20)" },
+  chip_full: { backgroundColor: "rgba(255, 231, 184, 0.20)" },
+  chip_closed: { backgroundColor: "rgba(180, 150, 255, 0.20)" },
+  chip_scheduled: { backgroundColor: "rgba(255,255,255,0.10)" },
 
-  chip_ontrack: { backgroundColor: "#DFF7E3" },
-  chip_needs: { backgroundColor: "#EDEDED" },
-  chip_atrisk: { backgroundColor: "#FFE1E1" },
-  chip_cancelled: { backgroundColor: "#F2F2F2" },
-  chip_played: { backgroundColor: "#E6F4FF" },
-  chip_full: { backgroundColor: "#FFE7B8" },
-  chip_closed: { backgroundColor: "#E9E3FF" },
-  chip_scheduled: { backgroundColor: "#EDEDED" },
+  // My RSVP badge
+  myBadge: {
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+  },
+  myBadgeText: { fontSize: 12, fontWeight: "900", color: "rgba(255,255,255,0.92)" },
+  myBadge_confirmed: { backgroundColor: "rgba(27, 127, 90, 0.25)" },
+  myBadge_waitlisted: { backgroundColor: "rgba(255, 231, 184, 0.20)" },
+  myBadge_maybe: { backgroundColor: "rgba(120, 180, 255, 0.20)" },
+  myBadge_no: { backgroundColor: "rgba(255,255,255,0.08)" },
 
-  myBadge: { paddingVertical: 3, paddingHorizontal: 8, borderRadius: 999 },
-  myBadgeText: { fontSize: 12, fontWeight: "700" },
-  myBadge_confirmed: { backgroundColor: "#DFF7E3" },
-  myBadge_waitlisted: { backgroundColor: "#FFE7B8" },
-  myBadge_maybe: { backgroundColor: "#E6F4FF" },
-  myBadge_no: { backgroundColor: "#F2F2F2" },
-
-  noTeamTitle: { fontSize: 18, fontWeight: "700" },
-  noTeamSub: { marginTop: 8, marginBottom: 16, color: "#555" },
+  // Empty / notices
+  centerWrap: { flex: 1, justifyContent: "center", alignItems: "center" },
+  glassNotice: {
+    width: "100%",
+    borderRadius: 22,
+    padding: 18,
+    backgroundColor: "rgba(10, 16, 25, 0.78)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+  },
+  noticeTitle: {
+    fontSize: 18,
+    fontWeight: "900",
+    color: "rgba(255,255,255,0.92)",
+  },
+  noticeSub: {
+    marginTop: 6,
+    color: "rgba(255,255,255,0.70)",
+    fontWeight: "700",
+    lineHeight: 18,
+  },
 });
