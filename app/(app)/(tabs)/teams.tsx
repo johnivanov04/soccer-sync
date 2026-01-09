@@ -1,14 +1,31 @@
 // app/(app)/(tabs)/teams.tsx
-import { collection, doc, query, where, type DocumentData, type QueryDocumentSnapshot, } from "firebase/firestore";
+import {
+  collection,
+  doc,
+  query,
+  where,
+  type DocumentData,
+  type QueryDocumentSnapshot,
+} from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import React, { useEffect, useMemo, useState } from "react";
-import { Alert, Button, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import {
+  ActivityIndicator,
+  Alert,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db, functions } from "../../../src/firebaseConfig";
 import { onSnapshotSafe } from "../../../src/firestoreSafe";
 
 type QDoc = QueryDocumentSnapshot<DocumentData>;
+
 type Team = {
   id: string;
   name?: string;
@@ -57,6 +74,185 @@ function prettyFnError(e: any) {
     return "Not found.";
   }
   return msg || "Something went wrong.";
+}
+
+function initialsFromName(name?: string | null) {
+  const base = (name ?? "").trim();
+  if (!base) return "U";
+  const parts = base.split(" ").filter(Boolean);
+  const first = parts[0]?.[0] ?? "U";
+  const last = parts.length > 1 ? parts[parts.length - 1]?.[0] : "";
+  return (first + last).toUpperCase();
+}
+
+function Pill({ text }: { text: string }) {
+  return (
+    <View style={styles.pill}>
+      <Text style={styles.pillText}>{text}</Text>
+    </View>
+  );
+}
+
+function GlassCard({ children }: { children: React.ReactNode }) {
+  return <View style={styles.card}>{children}</View>;
+}
+
+function SectionTitle({
+  title,
+  subtitle,
+}: {
+  title: string;
+  subtitle?: string;
+}) {
+  return (
+    <View style={{ marginBottom: 10 }}>
+      <Text style={styles.sectionTitle}>{title}</Text>
+      {!!subtitle && <Text style={styles.sectionSubtitle}>{subtitle}</Text>}
+    </View>
+  );
+}
+
+function ActionButton({
+  title,
+  onPress,
+  disabled,
+  variant = "primary",
+  rightSlot,
+}: {
+  title: string;
+  onPress: () => void;
+  disabled?: boolean;
+  variant?: "primary" | "secondary" | "danger";
+  rightSlot?: React.ReactNode;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={!!disabled}
+      style={({ pressed }) => [
+        styles.btnBase,
+        variant === "primary" && styles.btnPrimary,
+        variant === "secondary" && styles.btnSecondary,
+        variant === "danger" && styles.btnDanger,
+        disabled && styles.btnDisabled,
+        pressed && !disabled ? { transform: [{ scale: 0.99 }] } : null,
+      ]}
+    >
+      <Text
+        style={[
+          styles.btnText,
+          variant === "secondary" ? styles.btnTextSecondary : styles.btnTextPrimary,
+        ]}
+      >
+        {title}
+      </Text>
+      {!!rightSlot && <View style={{ marginLeft: 10 }}>{rightSlot}</View>}
+    </Pressable>
+  );
+}
+
+function SmallButton({
+  title,
+  onPress,
+  disabled,
+  variant = "primary",
+}: {
+  title: string;
+  onPress: () => void;
+  disabled?: boolean;
+  variant?: "primary" | "danger" | "secondary";
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={!!disabled}
+      style={({ pressed }) => [
+        styles.smallBtn,
+        variant === "primary" && styles.smallBtnPrimary,
+        variant === "secondary" && styles.smallBtnSecondary,
+        variant === "danger" && styles.smallBtnDanger,
+        disabled && { opacity: 0.6 },
+        pressed && !disabled ? { transform: [{ scale: 0.98 }] } : null,
+      ]}
+    >
+      <Text
+        style={[
+          styles.smallBtnText,
+          variant === "secondary" ? styles.smallBtnTextSecondary : styles.smallBtnTextPrimary,
+        ]}
+      >
+        {title}
+      </Text>
+    </Pressable>
+  );
+}
+
+function InputRow({
+  label,
+  icon,
+  placeholder,
+  value,
+  onChangeText,
+  editable,
+  autoCapitalize,
+  keyboardType,
+  helper,
+}: {
+  label: string;
+  icon: string;
+  placeholder: string;
+  value: string;
+  onChangeText: (v: string) => void;
+  editable?: boolean;
+  autoCapitalize?: "none" | "sentences" | "words" | "characters";
+  keyboardType?: "default" | "email-address";
+  helper?: string;
+}) {
+  return (
+    <View style={{ marginTop: 12 }}>
+      <Text style={styles.label}>{label}</Text>
+      <View style={[styles.inputRow, !editable && { opacity: 0.75 }]}>
+        <Text style={styles.inputIcon}>{icon}</Text>
+        <TextInput
+          style={styles.input}
+          placeholder={placeholder}
+          placeholderTextColor="rgba(255,255,255,0.35)"
+          value={value}
+          onChangeText={onChangeText}
+          editable={editable}
+          autoCapitalize={autoCapitalize}
+          keyboardType={keyboardType}
+        />
+      </View>
+      {!!helper && <Text style={styles.helper}>{helper}</Text>}
+    </View>
+  );
+}
+
+function PersonRow({
+  name,
+  subtitle,
+  right,
+}: {
+  name: string;
+  subtitle?: string;
+  right?: React.ReactNode;
+}) {
+  const initials = initialsFromName(name);
+  return (
+    <View style={styles.rowCard}>
+      <View style={styles.avatar}>
+        <Text style={styles.avatarText}>{initials}</Text>
+      </View>
+
+      <View style={{ flex: 1 }}>
+        <Text style={styles.rowTitle}>{name}</Text>
+        {!!subtitle && <Text style={styles.rowSub}>{subtitle}</Text>}
+      </View>
+
+      {!!right && <View style={{ marginLeft: 10 }}>{right}</View>}
+    </View>
+  );
 }
 
 export default function TeamsScreen() {
@@ -444,11 +640,28 @@ export default function TeamsScreen() {
     }
   };
 
+  const header = (
+    <View style={styles.header}>
+      <Text style={styles.title}>Teams</Text>
+      <Text style={styles.subtitle}>Create a squad, approve requests, and manage members.</Text>
+    </View>
+  );
+
   if (loading) {
     return (
-      <SafeAreaView style={styles.safe} edges={["top"]}>
-        <View style={styles.container}>
-          <Text>Loading…</Text>
+      <SafeAreaView style={styles.safe} edges={["left", "right", "bottom"]}>
+        <View style={styles.screen}>
+          <View style={styles.bg} />
+          <View style={styles.bgGlowTop} />
+          <View style={styles.bgGlowBottom} />
+
+          <View style={[styles.container, { justifyContent: "center" }]}>
+            {header}
+            <View style={{ marginTop: 20, alignItems: "center" }}>
+              <ActivityIndicator />
+              <Text style={styles.muted}>(Loading team…)</Text>
+            </View>
+          </View>
         </View>
       </SafeAreaView>
     );
@@ -456,9 +669,18 @@ export default function TeamsScreen() {
 
   if (!user) {
     return (
-      <SafeAreaView style={styles.safe} edges={["top"]}>
-        <View style={styles.container}>
-          <Text>Please sign in to manage your team.</Text>
+      <SafeAreaView style={styles.safe} edges={["left", "right", "bottom"]}>
+        <View style={styles.screen}>
+          <View style={styles.bg} />
+          <View style={styles.bgGlowTop} />
+          <View style={styles.bgGlowBottom} />
+
+          <View style={styles.container}>
+            {header}
+            <GlassCard>
+              <Text style={styles.cardText}>Please sign in to manage your team.</Text>
+            </GlassCard>
+          </View>
         </View>
       </SafeAreaView>
     );
@@ -467,202 +689,490 @@ export default function TeamsScreen() {
   const inviteCode = team?.inviteCode ?? "";
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
-      <ScrollView contentContainerStyle={styles.container}>
-        <Text style={styles.title}>Your Team</Text>
+    <SafeAreaView style={styles.safe} edges={["left", "right", "bottom"]}>
+      <View style={styles.screen}>
+        {/* Background */}
+        <View style={styles.bg} />
+        <View style={styles.bgGlowTop} />
+        <View style={styles.bgGlowBottom} />
 
-        {activeMembership && team ? (
-          <View style={styles.card}>
-            <Text style={styles.teamName}>{team.name ?? team.id}</Text>
-            <Text style={styles.teamMeta}>Role: {activeMembership.role}</Text>
-            <Text style={styles.teamMeta}>Invite code: {inviteCode}</Text>
+        <ScrollView contentContainerStyle={styles.container}>
+          {header}
 
-            <View style={{ height: 10 }} />
+          {/* Status card */}
+          {activeMembership && team ? (
+            <GlassCard>
+              <View style={styles.cardHeaderRow}>
+                <Text style={styles.teamName}>{team.name ?? team.id}</Text>
+                <Pill text={activeMembership.role.toUpperCase()} />
+              </View>
 
-            <Button
-              title={saving ? "Working..." : "Leave team"}
-              onPress={handleLeaveTeam}
-              disabled={saving}
-              color="#d11"
-            />
+              <Text style={styles.cardText}>
+                Invite code{" "}
+                <Text style={styles.cardTextStrong}>{inviteCode || "(none)"}</Text>
+              </Text>
 
-            {isAdmin && (
-              <>
-                <View style={{ height: 10 }} />
-                <Button
-                  title={saving ? "Working..." : "Rotate invite code"}
-                  onPress={handleRotateInvite}
-                  disabled={saving}
-                />
-              </>
-            )}
-          </View>
-        ) : pendingMembership ? (
-          <View style={styles.card}>
-            <Text style={styles.teamName}>Request pending</Text>
-            <Text style={styles.teamMeta}>
-              Team: {pendingMembership.teamName ?? pendingMembership.teamId}
-            </Text>
-            <View style={{ height: 10 }} />
-            <Button
-              title={saving ? "Working..." : "Cancel request"}
-              onPress={handleCancelPending}
-              disabled={saving}
-              color="#d11"
-            />
-          </View>
-        ) : (
-          <View style={styles.card}>
-            <Text style={styles.teamMeta}>
-              You’re not in a team yet. Join using a code, or create a new team.
-            </Text>
-          </View>
-        )}
+              <View style={{ height: 14 }} />
 
-        {/* Admin: pending requests */}
-        {activeMembership && isAdmin && pendingRequests.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Pending requests</Text>
+              <ActionButton
+                title={saving ? "Working…" : "Leave team"}
+                onPress={handleLeaveTeam}
+                disabled={saving}
+                variant="danger"
+                rightSlot={saving ? <ActivityIndicator /> : null}
+              />
 
-            {pendingRequests.map((r) => (
-              <View key={r.id} style={styles.rowCard}>
-                <View style={{ flex: 1 }}>
-                  <Text style={{ fontWeight: "700" }}>
-                    {r.userDisplayName ?? r.userEmail ?? r.userId}
-                  </Text>
-                  <Text style={{ color: "#666", marginTop: 2 }}>{r.userEmail ?? r.userId}</Text>
-                </View>
-
-                <View style={{ gap: 8 }}>
-                  <Button title="Approve" onPress={() => handleApprove(r.userId)} disabled={saving} />
-                  <Button
-                    title="Deny"
-                    onPress={() => handleDeny(r.userId)}
+              {isAdmin && (
+                <View style={{ marginTop: 10 }}>
+                  <ActionButton
+                    title={saving ? "Working…" : "Rotate invite code"}
+                    onPress={handleRotateInvite}
                     disabled={saving}
-                    color="#d11"
+                    variant="secondary"
+                    rightSlot={saving ? <ActivityIndicator /> : null}
                   />
                 </View>
+              )}
+            </GlassCard>
+          ) : pendingMembership ? (
+            <GlassCard>
+              <View style={styles.cardHeaderRow}>
+                <Text style={styles.teamName}>Request pending</Text>
+                <Pill text="PENDING" />
               </View>
-            ))}
-          </View>
-        )}
 
-        {/* Members list */}
-        {activeMembership && members.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Members</Text>
+              <Text style={styles.cardText}>
+                Team{" "}
+                <Text style={styles.cardTextStrong}>
+                  {pendingMembership.teamName ?? pendingMembership.teamId}
+                </Text>
+              </Text>
 
-            {members.map((m) => {
-              const isMe = m.userId === user.uid;
-              const canKick = isAdmin && !isMe && m.role !== "owner";
-              return (
-                <View key={m.id} style={styles.rowCard}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ fontWeight: "700" }}>
-                      {m.userDisplayName ?? m.userEmail ?? m.userId} {isMe ? "(you)" : ""}
-                    </Text>
-                    <Text style={{ color: "#666", marginTop: 2 }}>{m.role}</Text>
-                  </View>
+              <View style={{ height: 14 }} />
 
-                  {canKick ? (
-                    <Button
-                      title="Remove"
-                      color="#d11"
-                      onPress={() => handleKick(m.userId)}
-                      disabled={saving}
-                    />
-                  ) : null}
+              <ActionButton
+                title={saving ? "Working…" : "Cancel request"}
+                onPress={handleCancelPending}
+                disabled={saving}
+                variant="danger"
+                rightSlot={saving ? <ActivityIndicator /> : null}
+              />
+            </GlassCard>
+          ) : (
+            <GlassCard>
+              <Text style={styles.cardText}>
+                You’re not in a team yet. Join using an invite code, or create a new team.
+              </Text>
+            </GlassCard>
+          )}
+
+          {/* Admin: pending requests */}
+          {activeMembership && isAdmin && pendingRequests.length > 0 && (
+            <View style={styles.section}>
+              <SectionTitle
+                title="Pending requests"
+                subtitle="Approve players to join your team."
+              />
+
+              <GlassCard>
+                {pendingRequests.map((r, idx) => {
+                  const name = String(r.userDisplayName ?? r.userEmail ?? r.userId);
+                  const sub = String(r.userEmail ?? r.userId);
+
+                  return (
+                    <View key={r.id}>
+                      <PersonRow
+                        name={name}
+                        subtitle={sub}
+                        right={
+                          <View style={{ flexDirection: "row", gap: 8 }}>
+                            <SmallButton
+                              title="Approve"
+                              onPress={() => handleApprove(r.userId)}
+                              disabled={saving}
+                              variant="primary"
+                            />
+                            <SmallButton
+                              title="Deny"
+                              onPress={() => handleDeny(r.userId)}
+                              disabled={saving}
+                              variant="danger"
+                            />
+                          </View>
+                        }
+                      />
+                      {idx !== pendingRequests.length - 1 && <View style={styles.divider} />}
+                    </View>
+                  );
+                })}
+              </GlassCard>
+            </View>
+          )}
+
+          {/* Members list */}
+          {activeMembership && members.length > 0 && (
+            <View style={styles.section}>
+              <SectionTitle
+                title="Members"
+                subtitle="Active players in your team."
+              />
+
+              <GlassCard>
+                {members.map((m, idx) => {
+                  const isMe = m.userId === user.uid;
+                  const canKick = isAdmin && !isMe && m.role !== "owner";
+
+                  const name = String(m.userDisplayName ?? m.userEmail ?? m.userId);
+                  const sub = `${m.role}${isMe ? " • you" : ""}`;
+
+                  return (
+                    <View key={m.id}>
+                      <PersonRow
+                        name={name}
+                        subtitle={sub}
+                        right={
+                          canKick ? (
+                            <SmallButton
+                              title="Remove"
+                              onPress={() => handleKick(m.userId)}
+                              disabled={saving}
+                              variant="danger"
+                            />
+                          ) : null
+                        }
+                      />
+                      {idx !== members.length - 1 && <View style={styles.divider} />}
+                    </View>
+                  );
+                })}
+              </GlassCard>
+            </View>
+          )}
+
+          {/* Join (only if not active/pending) */}
+          {!activeMembershipRaw && !pendingMembership && (
+            <View style={styles.section}>
+              <SectionTitle
+                title="Join a team"
+                subtitle="Enter an invite code to request access."
+              />
+
+              <GlassCard>
+                <InputRow
+                  label="Invite code"
+                  icon="🔑"
+                  placeholder="e.g. goatfc"
+                  value={joinCode}
+                  onChangeText={setJoinCode}
+                  editable={!saving}
+                  autoCapitalize="none"
+                  helper="3–24 chars: lowercase letters/numbers/hyphens only."
+                />
+
+                <View style={{ marginTop: 14 }}>
+                  <ActionButton
+                    title={saving ? "Working…" : "Request to join"}
+                    onPress={handleJoinTeam}
+                    disabled={saving}
+                    variant="primary"
+                    rightSlot={saving ? <ActivityIndicator /> : null}
+                  />
                 </View>
-              );
-            })}
-          </View>
-        )}
+              </GlassCard>
+            </View>
+          )}
 
-        {/* Join (only if not active/pending) */}
-        {!activeMembershipRaw && !pendingMembership && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Join by team code</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="Enter team code"
-              value={joinCode}
-              onChangeText={setJoinCode}
-              autoCapitalize="none"
-              editable={!saving}
-            />
-            <Button title={saving ? "Working..." : "Request to join"} onPress={handleJoinTeam} disabled={saving} />
-          </View>
-        )}
+          {/* Create (only if not active/pending) */}
+          {!activeMembershipRaw && !pendingMembership && (
+            <View style={styles.section}>
+              <SectionTitle
+                title="Create a team"
+                subtitle="Make a new squad and share the invite code."
+              />
 
-        {/* Create (only if not active/pending) */}
-        {!activeMembershipRaw && !pendingMembership && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Create a new team</Text>
+              <GlassCard>
+                <InputRow
+                  label="Team name"
+                  icon="🏷️"
+                  placeholder="e.g. Goat FC"
+                  value={newTeamName}
+                  onChangeText={setNewTeamName}
+                  editable={!saving}
+                  autoCapitalize="words"
+                />
 
-            <Text style={styles.label}>Team name</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="e.g. goatfc"
-              value={newTeamName}
-              onChangeText={setNewTeamName}
-              editable={!saving}
-            />
+                <InputRow
+                  label="Team code"
+                  icon="⚙️"
+                  placeholder="e.g. goatfc"
+                  value={newTeamCode}
+                  onChangeText={setNewTeamCode}
+                  editable={!saving}
+                  autoCapitalize="none"
+                  helper="3–24 chars: lowercase letters/numbers/hyphens only."
+                />
 
-            <Text style={styles.label}>Team code</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="e.g. goatfc (letters/numbers/hyphens)"
-              value={newTeamCode}
-              onChangeText={setNewTeamCode}
-              autoCapitalize="none"
-              editable={!saving}
-            />
-            <Text style={styles.helper}>3–24 chars, lowercase letters/numbers/hyphens only.</Text>
+                <View style={{ marginTop: 14 }}>
+                  <ActionButton
+                    title={saving ? "Working…" : "Create team"}
+                    onPress={handleCreateTeam}
+                    disabled={saving}
+                    variant="primary"
+                    rightSlot={saving ? <ActivityIndicator /> : null}
+                  />
+                </View>
+              </GlassCard>
+            </View>
+          )}
 
-            <Button title={saving ? "Working..." : "Create team"} onPress={handleCreateTeam} disabled={saving} />
-          </View>
-        )}
-
-        <View style={{ height: 30 }} />
-      </ScrollView>
+          <View style={{ height: 26 }} />
+          <Text style={styles.footer}>⚽ Teams keep matches organized and private.</Text>
+          <View style={{ height: 18 }} />
+        </ScrollView>
+      </View>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1 },
-  container: { padding: 16 },
-  title: { fontSize: 22, fontWeight: "700", marginBottom: 16 },
-  card: {
-    padding: 16,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#ddd",
-    marginBottom: 20,
-    backgroundColor: "#fff",
+  safe: { flex: 1, backgroundColor: "#052b22" },
+
+  // Screen + background
+  screen: { flex: 1, backgroundColor: "#052b22" },
+  bg: { ...StyleSheet.absoluteFillObject, backgroundColor: "#052b22" },
+
+  // Subtle glow (no field outlines)
+  bgGlowTop: {
+    position: "absolute",
+    top: -120,
+    left: -80,
+    width: 260,
+    height: 260,
+    borderRadius: 130,
+    backgroundColor: "rgba(27, 127, 90, 0.25)",
   },
-  teamName: { fontSize: 18, fontWeight: "800", marginBottom: 6 },
-  teamMeta: { fontSize: 14, color: "#555", marginTop: 2 },
-  section: { marginBottom: 22 },
-  sectionTitle: { fontSize: 16, fontWeight: "700", marginBottom: 10 },
+  bgGlowBottom: {
+    position: "absolute",
+    bottom: -140,
+    right: -100,
+    width: 320,
+    height: 320,
+    borderRadius: 160,
+    backgroundColor: "rgba(255, 255, 255, 0.08)",
+  },
+
+  container: {
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 28,
+  },
+
+  header: {
+    marginBottom: 14,
+  },
+  title: {
+    fontSize: 30,
+    fontWeight: "900",
+    color: "white",
+    letterSpacing: 0.2,
+  },
+  subtitle: {
+    marginTop: 6,
+    fontSize: 14,
+    fontWeight: "700",
+    color: "rgba(255,255,255,0.7)",
+  },
+
+  // Cards
+  card: {
+    borderRadius: 22,
+    padding: 16,
+    backgroundColor: "rgba(10, 16, 25, 0.78)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+  },
+  cardHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    marginBottom: 10,
+  },
+  teamName: {
+    flex: 1,
+    fontSize: 18,
+    fontWeight: "900",
+    color: "white",
+  },
+  cardText: {
+    color: "rgba(255,255,255,0.75)",
+    fontSize: 14,
+    fontWeight: "700",
+    lineHeight: 18,
+  },
+  cardTextStrong: {
+    color: "white",
+    fontWeight: "900",
+  },
+
+  section: {
+    marginTop: 16,
+  },
+  sectionTitle: {
+    fontSize: 16,
+    fontWeight: "900",
+    color: "white",
+  },
+  sectionSubtitle: {
+    marginTop: 4,
+    fontSize: 13,
+    fontWeight: "700",
+    color: "rgba(255,255,255,0.65)",
+  },
+
+  // Pills
+  pill: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+  },
+  pillText: {
+    color: "rgba(255,255,255,0.85)",
+    fontSize: 12,
+    fontWeight: "900",
+    letterSpacing: 0.4,
+  },
+
+  // Inputs
+  label: {
+    fontSize: 14,
+    fontWeight: "900",
+    color: "rgba(255,255,255,0.80)",
+    marginBottom: 8,
+  },
+  helper: {
+    marginTop: 8,
+    fontSize: 12,
+    fontWeight: "700",
+    color: "rgba(255,255,255,0.55)",
+  },
+  inputRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    height: 54,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+  },
+  inputIcon: { fontSize: 18, marginRight: 10, opacity: 0.9 },
+  input: {
+    flex: 1,
+    color: "white",
+    fontSize: 16,
+    fontWeight: "700",
+  },
+
+  // Buttons
+  btnBase: {
+    height: 54,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+  },
+  btnPrimary: {
+    backgroundColor: "#1b7f5a",
+  },
+  btnSecondary: {
+    backgroundColor: "rgba(255,255,255,0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.14)",
+  },
+  btnDanger: {
+    backgroundColor: "rgba(216, 74, 74, 0.95)",
+  },
+  btnDisabled: {
+    opacity: 0.6,
+  },
+  btnText: {
+    fontSize: 16,
+    fontWeight: "900",
+  },
+  btnTextPrimary: { color: "#04130f" },
+  btnTextSecondary: { color: "white" },
+
+  smallBtn: {
+    height: 34,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  smallBtnPrimary: { backgroundColor: "#1b7f5a" },
+  smallBtnSecondary: {
+    backgroundColor: "rgba(255,255,255,0.10)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.14)",
+  },
+  smallBtnDanger: { backgroundColor: "rgba(216, 74, 74, 0.95)" },
+  smallBtnText: { fontSize: 12, fontWeight: "900" },
+  smallBtnTextPrimary: { color: "#04130f" },
+  smallBtnTextSecondary: { color: "white" },
+
+  // Rows
   rowCard: {
     flexDirection: "row",
     alignItems: "center",
+    paddingVertical: 10,
     gap: 12,
-    padding: 12,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#eee",
-    backgroundColor: "#fff",
-    marginBottom: 10,
   },
-  label: { fontSize: 14, fontWeight: "600", marginBottom: 6, marginTop: 8 },
-  helper: { fontSize: 12, color: "#666", marginBottom: 10 },
-  input: {
+  divider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: "rgba(255,255,255,0.10)",
+  },
+  avatar: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "rgba(255,255,255,0.10)",
     borderWidth: 1,
-    borderColor: "#ccc",
-    borderRadius: 8,
-    padding: 10,
-    marginBottom: 8,
+    borderColor: "rgba(255,255,255,0.14)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  avatarText: {
+    color: "white",
+    fontWeight: "900",
+  },
+  rowTitle: {
+    color: "white",
+    fontSize: 15,
+    fontWeight: "900",
+  },
+  rowSub: {
+    marginTop: 2,
+    color: "rgba(255,255,255,0.65)",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+
+  muted: {
+    marginTop: 10,
+    textAlign: "center",
+    color: "rgba(255,255,255,0.6)",
+    fontWeight: "700",
+  },
+
+  footer: {
+    marginTop: 12,
+    textAlign: "center",
+    color: "rgba(255,255,255,0.55)",
+    fontSize: 13,
+    fontWeight: "700",
   },
 });
