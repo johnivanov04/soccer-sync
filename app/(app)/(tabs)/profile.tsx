@@ -334,7 +334,7 @@ export default function ProfileScreen() {
 
   if (!user) {
     return (
-      <SafeAreaView style={styles.safe} edges={["top"]}>
+      <SafeAreaView style={styles.safe} edges={["left", "right", "bottom"]}>
         <View style={[styles.screen, styles.center]}>
           <Text style={{ color: "white", fontWeight: "800" }}>You’re not signed in.</Text>
         </View>
@@ -344,7 +344,7 @@ export default function ProfileScreen() {
 
   if (loading) {
     return (
-      <SafeAreaView style={styles.safe} edges={["top"]}>
+      <SafeAreaView style={styles.safe} edges={["left", "right", "bottom"]}>
         <View style={[styles.screen, styles.center]}>
           <ActivityIndicator color="white" />
           <Text style={{ marginTop: 10, color: "rgba(255,255,255,0.75)", fontWeight: "800" }}>
@@ -366,7 +366,7 @@ export default function ProfileScreen() {
   const avatarUri = photoURL ? withCacheBuster(photoURL, photoVersion) : null;
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
+    <SafeAreaView style={styles.safe} edges={["left", "right", "bottom"]}>
       <View style={styles.screen}>
         <View style={styles.bg} />
 
