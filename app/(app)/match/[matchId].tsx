@@ -17,10 +17,11 @@ import {
 } from "firebase/firestore";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
-  Button,
   Linking,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -165,7 +166,9 @@ function PersonRow({
       </View>
 
       <View style={{ flex: 1 }}>
-        <Text style={styles.personName}>{name}</Text>
+        <Text style={styles.personName} numberOfLines={1}>
+          {name}
+        </Text>
         {!!subtitle && <Text style={styles.personSub}>{subtitle}</Text>}
       </View>
     </View>
@@ -207,6 +210,88 @@ async function loadUserProfilesByUids(uids: string[]) {
   return out;
 }
 
+function Chip({
+  label,
+  variant,
+}: {
+  label: string;
+  variant: "neutral" | "good" | "warn" | "bad";
+}) {
+  return (
+    <View style={[styles.chip, (styles as any)[`chip_${variant}`]]}>
+      <Text style={styles.chipText}>{label}</Text>
+    </View>
+  );
+}
+
+function ActionRow({
+  icon,
+  title,
+  subtitle,
+  onPress,
+  disabled,
+  destructive,
+}: {
+  icon: string;
+  title: string;
+  subtitle?: string;
+  onPress: () => void;
+  disabled?: boolean;
+  destructive?: boolean;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      style={({ pressed }) => [
+        styles.actionRow,
+        destructive && styles.actionRowDestructive,
+        disabled && { opacity: 0.55 },
+        pressed && !disabled && { transform: [{ scale: 0.997 }] },
+      ]}
+    >
+      <Text style={styles.actionIcon}>{icon}</Text>
+      <View style={{ flex: 1 }}>
+        <Text style={[styles.actionTitle, destructive && styles.actionTitleDestructive]}>
+          {title}
+        </Text>
+        {!!subtitle && <Text style={styles.actionSub}>{subtitle}</Text>}
+      </View>
+      <Text style={styles.actionChev}>›</Text>
+    </Pressable>
+  );
+}
+
+function RsvpPill({
+  label,
+  active,
+  disabled,
+  onPress,
+  tone,
+}: {
+  label: string;
+  active: boolean;
+  disabled: boolean;
+  onPress: () => void;
+  tone: "yes" | "maybe" | "no";
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      style={({ pressed }) => [
+        styles.rsvpPill,
+        (styles as any)[`rsvpPill_${tone}`],
+        active && styles.rsvpPillActive,
+        disabled && { opacity: 0.45 },
+        pressed && !disabled && { transform: [{ scale: 0.99 }] },
+      ]}
+    >
+      <Text style={styles.rsvpPillText}>{label}</Text>
+    </Pressable>
+  );
+}
+
 export default function MatchDetailScreen() {
   const params = useLocalSearchParams();
   const matchIdStr = paramToString(params?.matchId);
@@ -223,7 +308,6 @@ export default function MatchDetailScreen() {
   const [savingRsvp, setSavingRsvp] = useState(false);
 
   const [nowTick, setNowTick] = useState(Date.now());
-
   const prevWaitlistedRef = useRef<boolean | null>(null);
 
   // ✅ Option A: user profile map for avatars
@@ -281,11 +365,7 @@ export default function MatchDetailScreen() {
             (mine?.status === "yes" && (mine?.isWaitlisted ?? false)) ?? false;
 
           if (prevWaitlistedRef.current !== null) {
-            if (
-              prevWaitlistedRef.current === true &&
-              nowWaitlisted === false &&
-              mine?.status === "yes"
-            ) {
+            if (prevWaitlistedRef.current === true && nowWaitlisted === false && mine?.status === "yes") {
               Alert.alert("You’re in! ✅", "A spot opened up — you’re now confirmed for the match.");
             }
           }
@@ -347,29 +427,15 @@ export default function MatchDetailScreen() {
   }, [deadlineAt, nowTick]);
 
   const rsvpDisabledReason =
-    isCancelled
-      ? "Match cancelled"
-      : isPlayed
-      ? "Match already played"
-      : isRsvpClosed
-      ? "RSVP closed"
-      : null;
+    isCancelled ? "Match cancelled" : isPlayed ? "Match already played" : isRsvpClosed ? "RSVP closed" : null;
 
-  const going = useMemo(
-    () => rsvps.filter((r) => r.status === "yes" && !r.isWaitlisted),
-    [rsvps]
-  );
-  const waitlist = useMemo(
-    () => rsvps.filter((r) => r.status === "yes" && r.isWaitlisted),
-    [rsvps]
-  );
+  const going = useMemo(() => rsvps.filter((r) => r.status === "yes" && !r.isWaitlisted), [rsvps]);
+  const waitlist = useMemo(() => rsvps.filter((r) => r.status === "yes" && r.isWaitlisted), [rsvps]);
 
   const goingSorted = useMemo(() => {
     const copy = [...going];
     copy.sort((a, b) =>
-      String(a.playerName ?? a.userId ?? "").localeCompare(
-        String(b.playerName ?? b.userId ?? "")
-      )
+      String(a.playerName ?? a.userId ?? "").localeCompare(String(b.playerName ?? b.userId ?? ""))
     );
     return copy;
   }, [going]);
@@ -377,17 +443,12 @@ export default function MatchDetailScreen() {
   const waitlistSorted = useMemo(() => {
     const copy = [...waitlist];
     copy.sort((a, b) =>
-      String(a.playerName ?? a.userId ?? "").localeCompare(
-        String(b.playerName ?? b.userId ?? "")
-      )
+      String(a.playerName ?? a.userId ?? "").localeCompare(String(b.playerName ?? b.userId ?? ""))
     );
     return copy;
   }, [waitlist]);
 
-  const myRsvp = useMemo(
-    () => rsvps.find((r) => r.userId === user?.uid),
-    [rsvps, user?.uid]
-  );
+  const myRsvp = useMemo(() => rsvps.find((r) => r.userId === user?.uid), [rsvps, user?.uid]);
   const userWaitlisted = myRsvp?.isWaitlisted ?? false;
 
   const maxPlayers = Number(match?.maxPlayers ?? 0);
@@ -400,15 +461,16 @@ export default function MatchDetailScreen() {
   const deadlineMs = deadlineAt ? deadlineAt.getTime() - nowTick : null;
 
   const startLabel =
-    startMs >= 0
-      ? `Starts in ${formatCountdown(startMs)}`
-      : `Started ${formatCountdown(-startMs)} ago`;
+    startMs >= 0 ? `Starts in ${formatCountdown(startMs)}` : `Started ${formatCountdown(-startMs)} ago`;
 
   const rsvpLabel = deadlineAt
     ? deadlineMs !== null && deadlineMs >= 0
       ? `RSVP closes in ${formatCountdown(deadlineMs)}`
       : `RSVP closed (${deadlineAt.toLocaleString()})`
     : "No RSVP deadline";
+
+  const statusText =
+    statusLabel === "played" ? "Played" : isCancelled ? "Cancelled" : "Scheduled";
 
   const handleOpenChat = () => {
     if (!matchIdStr) return;
@@ -467,14 +529,12 @@ export default function MatchDetailScreen() {
       if (status === "yes" && maxPlayersFresh > 0) {
         const confirmedFromMatch = Number(matchData.confirmedYesCount);
         const localConfirmed = rsvps.filter((r) => r.status === "yes" && !r.isWaitlisted).length;
-
         const confirmed = Number.isFinite(confirmedFromMatch) ? confirmedFromMatch : localConfirmed;
         isWaitlisted = confirmed >= maxPlayersFresh;
       }
 
       if (status === "no") isWaitlisted = false;
 
-      // Keep using RSVP.playerName for display (fast). We do NOT store photo on RSVP (Option A).
       let playerName = user.email ?? user.uid;
       try {
         const userDocRef = doc(db, "users", user.uid);
@@ -483,9 +543,7 @@ export default function MatchDetailScreen() {
           const data = userSnap.data() as any;
           if (data?.displayName) playerName = data.displayName;
         }
-      } catch (innerErr) {
-        console.warn("Could not load user profile for RSVP name", innerErr);
-      }
+      } catch {}
 
       const rsvpRef = doc(db, "rsvps", rsvpId);
       await setDoc(
@@ -526,7 +584,6 @@ export default function MatchDetailScreen() {
     try {
       setSavingRsvp(true);
       await deleteDoc(rsvpRef);
-
       setUserStatus(null);
       prevWaitlistedRef.current = null;
     } catch (e) {
@@ -550,14 +607,9 @@ export default function MatchDetailScreen() {
       const matchRef = doc(db, "matches", matchIdStr);
       await updateDoc(matchRef, {
         status: nextStatus,
-
-        // ✅ used by Cloud Function to avoid notifying the actor
         updatedBy: user?.uid ?? null,
-
-        // ✅ OPTIONAL: makes it easier to distinguish "status changes" from normal edits later
         statusUpdatedBy: user?.uid ?? null,
         statusUpdatedAt: serverTimestamp(),
-
         updatedAt: serverTimestamp(),
       });
     } catch (e) {
@@ -593,7 +645,7 @@ export default function MatchDetailScreen() {
         .filter(Boolean)
         .join("\n");
 
-      const res = await addMatchToCalendar({
+      await addMatchToCalendar({
         id: String(matchIdStr),
         title: "Pickup Soccer",
         startAt,
@@ -601,284 +653,466 @@ export default function MatchDetailScreen() {
         location: match.locationText ?? "",
         notes,
       });
-
-      if ((res.action || "").toLowerCase().includes("cancel")) return;
     } catch (e: any) {
       console.error("Calendar export error", e);
-      Alert.alert(
-        "Couldn’t add to calendar",
-        e?.message ?? "Unknown error. Did you allow calendar permissions?"
-      );
+      Alert.alert("Couldn’t add to calendar", e?.message ?? "Unknown error. Did you allow calendar permissions?");
     } finally {
       setExportingCalendar(false);
     }
   };
 
-  const renderScroll = (children: React.ReactNode) => {
+  const renderScreen = (children: React.ReactNode) => {
     return (
       <SafeAreaView style={styles.safe} edges={["top"]}>
-        <ScrollView
-          style={{ flex: 1 }}
-          contentInsetAdjustmentBehavior="automatic"
-          contentContainerStyle={styles.container}
-        >
-          {children}
-        </ScrollView>
+        <View style={styles.screen}>
+          <View style={styles.bg}>
+            <View style={styles.pitchLines} />
+          </View>
+
+          <ScrollView
+            style={{ flex: 1 }}
+            contentInsetAdjustmentBehavior="automatic"
+            contentContainerStyle={styles.scrollContent}
+          >
+            {children}
+          </ScrollView>
+        </View>
       </SafeAreaView>
     );
   };
 
-  if (!matchIdStr) return renderScroll(<Text>Missing match id.</Text>);
-  if (loadingMatch || !match) return renderScroll(<Text>Loading match...</Text>);
+  if (!matchIdStr) return renderScreen(<Text style={styles.subtleText}>Missing match id.</Text>);
 
-  const statusText =
-    statusLabel === "played"
-      ? "Played"
-      : statusLabel === "cancelled" || statusLabel === "canceled"
-      ? "Cancelled"
-      : "Scheduled";
+  if (loadingMatch) {
+    return renderScreen(
+      <View style={[styles.card, { alignItems: "center" }]}>
+        <ActivityIndicator />
+        <Text style={[styles.subtleText, { marginTop: 10 }]}>Loading match…</Text>
+      </View>
+    );
+  }
 
-  return renderScroll(
+  if (!match) {
+    return renderScreen(
+      <View style={styles.card}>
+        <Text style={styles.h1}>Match not found</Text>
+        <Text style={styles.subtleText}>This match may have been deleted.</Text>
+
+        <Pressable
+          onPress={() => router.back()}
+          style={({ pressed }) => [styles.secondaryBtn, pressed && { transform: [{ scale: 0.99 }] }]}
+        >
+          <Text style={styles.secondaryBtnText}>Back</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
+  const headerDate = `${startAt.toLocaleDateString()} ${startAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+
+  const disabledYesMaybe = !!rsvpDisabledReason;
+  const showNotes = !!match.description?.trim();
+  const showLocation = !!match.locationText?.trim();
+
+  const chipVariantStatus =
+    statusText === "Cancelled" ? "bad" : statusText === "Played" ? "warn" : "neutral";
+
+  const spotsLabel =
+    maxPlayers > 0 && spotsLeft !== null ? (spotsLeft === 0 ? "Full" : `${spotsLeft} spot${spotsLeft === 1 ? "" : "s"} left`) : null;
+
+  return renderScreen(
     <>
-      <Text style={styles.title}>
-        {startAt.toLocaleDateString()}{" "}
-        {startAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-      </Text>
+      {/* Header */}
+      <View style={styles.header}>
+        <Text style={styles.h1}>{headerDate}</Text>
+        <Text style={styles.subtleText}>{startLabel}</Text>
+        <Text style={styles.subtleText}>{rsvpLabel}</Text>
 
-      <Text style={styles.subtle}>{startLabel}</Text>
-      <Text style={styles.subtle}>{rsvpLabel}</Text>
+        {showLocation && <Text style={styles.locationText}>{match.locationText!.trim()}</Text>}
 
-      {!!match.locationText && <Text style={styles.location}>{match.locationText}</Text>}
-
-      {!!match.description?.trim() && (
-        <View style={{ marginTop: 10 }}>
-          <Text style={styles.sectionTitle}>Notes</Text>
-          <Text style={styles.description}>{match.description.trim()}</Text>
-        </View>
-      )}
-
-      <View style={{ marginTop: 12, flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-        <Text style={styles.statusPill}>Status: {statusText}</Text>
-        {isHost && <Text style={styles.hostPill}>👑 Host</Text>}
-        {maxPlayers > 0 && spotsLeft !== null && (
-          <Text style={spotsLeft === 0 ? styles.fullPill : styles.spotsPill}>
-            {spotsLeft === 0 ? "Full" : `${spotsLeft} spot${spotsLeft === 1 ? "" : "s"} left`}
-          </Text>
+        {showNotes && (
+          <View style={{ marginTop: 10 }}>
+            <Text style={styles.sectionTitle}>Notes</Text>
+            <Text style={styles.bodyText}>{match.description!.trim()}</Text>
+          </View>
         )}
+
+        <View style={styles.chipRow}>
+          <Chip label={`Status: ${statusText}`} variant={chipVariantStatus} />
+          {isHost && <Chip label={"👑 Host"} variant="warn" />}
+          {!!spotsLabel && <Chip label={spotsLabel} variant={spotsLeft === 0 ? "bad" : "good"} />}
+        </View>
+
+        <Text style={styles.metaLine}>
+          {going.length}/{match.maxPlayers ?? "?"} going{waitlist.length > 0 ? ` • ${waitlist.length} waitlist` : ""}
+        </Text>
+
+        {rsvpDisabledReason && <Text style={styles.dangerText}>{rsvpDisabledReason}</Text>}
       </View>
 
-      <Text style={{ marginTop: 12 }}>
-        {going.length}/{match.maxPlayers ?? "?"} going
-        {waitlist.length > 0 ? ` • ${waitlist.length} waitlist` : ""}
-      </Text>
-
-      {rsvpDisabledReason && (
-        <Text style={{ marginTop: 8, color: "#a00" }}>{rsvpDisabledReason}</Text>
-      )}
-
       {/* Actions */}
-      <View style={{ marginTop: 12, alignSelf: "flex-start" }}>
-        <Button
-          title={exportingCalendar ? "Opening calendar..." : "Add to Calendar"}
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Actions</Text>
+
+        <ActionRow
+          icon={exportingCalendar ? "⏳" : "📅"}
+          title={exportingCalendar ? "Opening calendar…" : "Add to Calendar"}
+          subtitle="Create an event with location + notes"
           onPress={handleAddToCalendar}
           disabled={exportingCalendar}
         />
-      </View>
 
-      {!!match.locationText?.trim() && (
-        <View style={{ marginTop: 10, alignSelf: "flex-start" }}>
-          <Button title="Open in Maps" onPress={() => openInMaps(match.locationText!.trim())} />
-        </View>
-      )}
-
-      <View style={{ marginTop: 10, alignSelf: "flex-start" }}>
-        <Button title="Open Match Chat" onPress={handleOpenChat} />
-      </View>
-
-      <Text style={styles.sectionTitle}>Your RSVP</Text>
-      <View style={styles.rsvpRow}>
-        {RSVP_STATUSES.map((s) => (
-          <Button
-            key={s}
-            title={s.toUpperCase()}
-            color={userStatus === s ? "#007AFF" : "#aaa"}
-            onPress={() => handleRsvp(s)}
-            disabled={savingRsvp || (!!rsvpDisabledReason && s !== "no")}
+        {showLocation && (
+          <ActionRow
+            icon="🗺️"
+            title="Open in Maps"
+            subtitle="Get directions"
+            onPress={() => openInMaps(match.locationText!.trim())}
           />
-        ))}
+        )}
+
+        <ActionRow
+          icon="💬"
+          title="Open Match Chat"
+          subtitle="See messages for this match"
+          onPress={handleOpenChat}
+        />
       </View>
 
-      <Text style={styles.userStatusNote}>
-        {userStatus === "yes"
-          ? userWaitlisted
-            ? "You’re on the waitlist for this match."
-            : "You’re confirmed for this match."
-          : userStatus === "maybe"
-          ? "You’re marked as maybe."
-          : userStatus === "no"
-          ? "You’re marked as not going."
-          : "Tap YES, MAYBE, or NO to update your status."}
-      </Text>
+      {/* RSVP */}
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Your RSVP</Text>
 
-      {!!myRsvp && (
-        <View style={{ marginTop: 10 }}>
-          <Button
-            title="Leave match (set to NO)"
+        <View style={styles.rsvpRow}>
+          <RsvpPill
+            label="YES"
+            tone="yes"
+            active={userStatus === "yes"}
+            disabled={savingRsvp || (disabledYesMaybe && true)}
+            onPress={() => handleRsvp("yes")}
+          />
+          <RsvpPill
+            label="MAYBE"
+            tone="maybe"
+            active={userStatus === "maybe"}
+            disabled={savingRsvp || (disabledYesMaybe && true)}
+            onPress={() => handleRsvp("maybe")}
+          />
+          <RsvpPill
+            label="NO"
+            tone="no"
+            active={userStatus === "no"}
+            disabled={savingRsvp}
             onPress={() => handleRsvp("no")}
-            disabled={savingRsvp}
-          />
-          <View style={{ height: 8 }} />
-          <Button
-            title="Remove RSVP (delete)"
-            color="#d11"
-            onPress={confirmRemoveRsvp}
-            disabled={savingRsvp}
           />
         </View>
-      )}
 
-      {/* ✅ Avatars list (Option A: read from users/{uid}.photoURL) */}
-      <Text style={styles.sectionTitle}>Going</Text>
-      {goingSorted.length === 0 && <Text>No confirmed players yet.</Text>}
+        <Text style={styles.userStatusNote}>
+          {userStatus === "yes"
+            ? userWaitlisted
+              ? "You’re on the waitlist for this match."
+              : "You’re confirmed for this match."
+            : userStatus === "maybe"
+            ? "You’re marked as maybe."
+            : userStatus === "no"
+            ? "You’re marked as not going."
+            : "Tap YES, MAYBE, or NO to update your status."}
+        </Text>
 
-      {goingSorted.map((r) => {
-        const uid = r.userId ?? "";
-        const prof = uid ? userProfiles[uid] : undefined;
+        {!!myRsvp && (
+          <View style={{ marginTop: 12 }}>
+            <ActionRow
+              icon="🚪"
+              title="Leave match (set to NO)"
+              subtitle="Keep your RSVP record but mark not going"
+              onPress={() => handleRsvp("no")}
+              disabled={savingRsvp}
+            />
+            <ActionRow
+              icon="🗑️"
+              title="Remove RSVP (delete)"
+              subtitle="Deletes your RSVP record"
+              onPress={confirmRemoveRsvp}
+              disabled={savingRsvp}
+              destructive
+            />
+          </View>
+        )}
+      </View>
 
-        const name = String(r.playerName || prof?.displayName || r.userId || "Unknown");
-        const subtitle =
-          uid && uid === match.createdBy ? "Host" : uid === user?.uid ? "You" : "";
+      {/* Going + Waitlist */}
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Going</Text>
+        {goingSorted.length === 0 && <Text style={styles.bodyMuted}>No confirmed players yet.</Text>}
 
-        return (
-          <PersonRow
-            key={r.id}
-            name={name}
-            subtitle={subtitle || undefined}
-            photoURL={prof?.photoURL ?? null}
-            updatedAtMs={prof?.updatedAtMs ?? null}
-            highlight={uid === user?.uid}
-          />
-        );
-      })}
+        {goingSorted.map((r) => {
+          const uid = r.userId ?? "";
+          const prof = uid ? userProfiles[uid] : undefined;
 
-      {waitlistSorted.length > 0 && (
-        <>
-          <Text style={styles.sectionTitle}>Waitlist</Text>
-          {waitlistSorted.map((r) => {
-            const uid = r.userId ?? "";
-            const prof = uid ? userProfiles[uid] : undefined;
+          const name = String(r.playerName || prof?.displayName || r.userId || "Unknown");
+          const subtitle = uid && uid === match.createdBy ? "Host" : uid === user?.uid ? "You" : "";
 
-            const name = String(r.playerName || prof?.displayName || r.userId || "Unknown");
-            const subtitle = uid === user?.uid ? "You" : undefined;
+          return (
+            <PersonRow
+              key={r.id}
+              name={name}
+              subtitle={subtitle || undefined}
+              photoURL={prof?.photoURL ?? null}
+              updatedAtMs={prof?.updatedAtMs ?? null}
+              highlight={uid === user?.uid}
+            />
+          );
+        })}
 
-            return (
-              <PersonRow
-                key={r.id}
-                name={name}
-                subtitle={subtitle}
-                photoURL={prof?.photoURL ?? null}
-                updatedAtMs={prof?.updatedAtMs ?? null}
-                highlight={uid === user?.uid}
-              />
-            );
-          })}
-        </>
-      )}
+        {waitlistSorted.length > 0 && (
+          <>
+            <Text style={[styles.sectionTitle, { marginTop: 14 }]}>Waitlist</Text>
+            {waitlistSorted.map((r) => {
+              const uid = r.userId ?? "";
+              const prof = uid ? userProfiles[uid] : undefined;
 
+              const name = String(r.playerName || prof?.displayName || r.userId || "Unknown");
+              const subtitle = uid === user?.uid ? "You" : undefined;
+
+              return (
+                <PersonRow
+                  key={r.id}
+                  name={name}
+                  subtitle={subtitle}
+                  photoURL={prof?.photoURL ?? null}
+                  updatedAtMs={prof?.updatedAtMs ?? null}
+                  highlight={uid === user?.uid}
+                />
+              );
+            })}
+          </>
+        )}
+      </View>
+
+      {/* Host tools */}
       {isHost && (
-        <>
+        <View style={styles.card}>
           <Text style={styles.sectionTitle}>Host tools</Text>
 
-          <View style={{ marginTop: 8 }}>
-            <Button
-              title="Edit match details"
-              onPress={() =>
-                router.push({
-                  pathname: "/(app)/match/edit",
-                  params: { matchId: String(matchIdStr) },
-                })
-              }
-            />
-          </View>
+          <ActionRow
+            icon="✏️"
+            title="Edit match details"
+            subtitle="Change time, players, notes, deadline"
+            onPress={() =>
+              router.push({
+                pathname: "/(app)/match/edit",
+                params: { matchId: String(matchIdStr) },
+              })
+            }
+          />
 
-          <View style={{ marginTop: 8 }}>
-            <Button title="Mark as played" onPress={() => confirmStatusChange("played")} />
-          </View>
+          <ActionRow
+            icon="✅"
+            title="Mark as played"
+            subtitle="Locks RSVPs + marks match complete"
+            onPress={() => confirmStatusChange("played")}
+          />
 
-          <View style={{ marginTop: 8 }}>
-            <Button
-              title="Cancel match"
-              color="#d11"
-              onPress={() => confirmStatusChange("cancelled")}
-            />
-          </View>
-        </>
+          <ActionRow
+            icon="⛔"
+            title="Cancel match"
+            subtitle="Notifies everyone (except you)"
+            onPress={() => confirmStatusChange("cancelled")}
+            destructive
+          />
+        </View>
       )}
 
-      <View style={{ height: 40 }} />
-      <Button title="Back to matches" onPress={() => router.back()} />
+      <Pressable
+        onPress={() => router.back()}
+        style={({ pressed }) => [styles.secondaryBtn, pressed && { transform: [{ scale: 0.99 }] }]}
+      >
+        <Text style={styles.secondaryBtnText}>Back to matches</Text>
+      </Pressable>
+
+      <View style={{ height: 22 }} />
     </>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1 },
-  container: { padding: 16 },
-  title: { fontSize: 20, fontWeight: "bold" },
+  safe: { flex: 1, backgroundColor: "#052b22" },
+  screen: { flex: 1, backgroundColor: "#052b22" },
 
-  subtle: { marginTop: 4, color: "#666" },
-  location: { marginTop: 10, color: "#444" },
+  // Background
+  bg: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "#052b22",
+  },
+  pitchLines: {
+    ...StyleSheet.absoluteFillObject,
+    opacity: 0.32,
+    backgroundColor: "transparent",
+  },
 
-  sectionTitle: { marginTop: 16, fontWeight: "700" },
-  description: { marginTop: 6, color: "#444", lineHeight: 18 },
+  scrollContent: {
+    paddingHorizontal: 18,
+    paddingTop: 12,
+    paddingBottom: 28,
+  },
+
+  header: {
+    marginBottom: 12,
+  },
+  h1: {
+    fontSize: 30,
+    fontWeight: "900",
+    color: "white",
+    letterSpacing: 0.2,
+  },
+  subtleText: {
+    marginTop: 6,
+    fontSize: 14,
+    fontWeight: "800",
+    color: "rgba(255,255,255,0.72)",
+  },
+
+  locationText: {
+    marginTop: 10,
+    fontSize: 15,
+    fontWeight: "900",
+    color: "rgba(255,255,255,0.82)",
+  },
+
+  sectionTitle: {
+    fontSize: 16,
+    fontWeight: "900",
+    color: "rgba(255,255,255,0.78)",
+    marginBottom: 10,
+  },
+  bodyText: {
+    color: "rgba(255,255,255,0.82)",
+    fontWeight: "800",
+    lineHeight: 19,
+  },
+  bodyMuted: {
+    color: "rgba(255,255,255,0.60)",
+    fontWeight: "800",
+  },
+
+  metaLine: {
+    marginTop: 12,
+    color: "rgba(255,255,255,0.70)",
+    fontWeight: "900",
+  },
+  dangerText: {
+    marginTop: 8,
+    color: "#ff7a7a",
+    fontWeight: "900",
+  },
+
+  chipRow: {
+    marginTop: 12,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  chip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  chipText: {
+    fontSize: 12,
+    fontWeight: "900",
+    color: "rgba(255,255,255,0.88)",
+  },
+  chip_neutral: {
+    backgroundColor: "rgba(255,255,255,0.10)",
+    borderColor: "rgba(255,255,255,0.12)",
+  },
+  chip_good: {
+    backgroundColor: "rgba(27,127,90,0.22)",
+    borderColor: "rgba(27,127,90,0.35)",
+  },
+  chip_warn: {
+    backgroundColor: "rgba(255,231,184,0.16)",
+    borderColor: "rgba(255,231,184,0.22)",
+  },
+  chip_bad: {
+    backgroundColor: "rgba(255,122,122,0.14)",
+    borderColor: "rgba(255,122,122,0.22)",
+  },
+
+  card: {
+    marginTop: 12,
+    borderRadius: 22,
+    padding: 18,
+    backgroundColor: "rgba(10, 16, 25, 0.78)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+  },
+
+  actionRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    minHeight: 56,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+    marginTop: 10,
+    gap: 12,
+  },
+  actionRowDestructive: {
+    backgroundColor: "rgba(255,122,122,0.08)",
+    borderColor: "rgba(255,122,122,0.18)",
+  },
+  actionIcon: { fontSize: 18, opacity: 0.95 },
+  actionTitle: { color: "white", fontWeight: "900", fontSize: 15 },
+  actionTitleDestructive: { color: "rgba(255,200,200,0.95)" },
+  actionSub: { marginTop: 3, color: "rgba(255,255,255,0.55)", fontWeight: "800", fontSize: 12 },
+  actionChev: { color: "rgba(255,255,255,0.60)", fontSize: 22, fontWeight: "900" },
 
   rsvpRow: {
     flexDirection: "row",
-    justifyContent: "space-around",
+    gap: 10,
     marginTop: 8,
+  },
+  rsvpPill: {
+    flex: 1,
+    height: 46,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+  },
+  rsvpPillText: {
+    fontSize: 14,
+    fontWeight: "900",
+    color: "rgba(255,255,255,0.90)",
+    letterSpacing: 0.2,
+  },
+  rsvpPill_yes: {
+    backgroundColor: "rgba(27,127,90,0.18)",
+    borderColor: "rgba(27,127,90,0.35)",
+  },
+  rsvpPill_maybe: {
+    backgroundColor: "rgba(255,255,255,0.08)",
+    borderColor: "rgba(255,255,255,0.12)",
+  },
+  rsvpPill_no: {
+    backgroundColor: "rgba(255,122,122,0.10)",
+    borderColor: "rgba(255,122,122,0.22)",
+  },
+  rsvpPillActive: {
+    borderColor: "rgba(255,255,255,0.45)",
   },
 
   userStatusNote: {
-    marginTop: 8,
+    marginTop: 10,
     textAlign: "center",
-    color: "#555",
+    color: "rgba(255,255,255,0.70)",
     fontSize: 13,
-  },
-
-  statusPill: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 999,
-    backgroundColor: "#E6F4FF",
-    fontSize: 12,
-    fontWeight: "700",
-  },
-
-  hostPill: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 999,
-    backgroundColor: "#FFF3CD",
-    fontSize: 12,
-    fontWeight: "700",
-  },
-
-  spotsPill: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 999,
-    backgroundColor: "#DFF7E3",
-    fontSize: 12,
-    fontWeight: "700",
-  },
-
-  fullPill: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 999,
-    backgroundColor: "#FFE7B8",
-    fontSize: 12,
-    fontWeight: "700",
+    fontWeight: "800",
   },
 
   personRow: {
@@ -886,21 +1120,25 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 10,
     paddingVertical: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "#eee",
+    paddingHorizontal: 10,
+    borderRadius: 14,
+    marginTop: 8,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
   },
   personRowHighlight: {
-    backgroundColor: "#f7faff",
-    borderRadius: 10,
-    paddingHorizontal: 8,
+    borderColor: "rgba(27,127,90,0.35)",
+    backgroundColor: "rgba(27,127,90,0.12)",
   },
+
   avatarSmWrap: {
     width: 36,
     height: 36,
     borderRadius: 18,
     overflow: "hidden",
     borderWidth: 1,
-    borderColor: "#ddd",
+    borderColor: "rgba(255,255,255,0.18)",
   },
   avatarSm: {
     width: 36,
@@ -910,19 +1148,38 @@ const styles = StyleSheet.create({
   avatarSmFallback: {
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#eef3ff",
+    backgroundColor: "rgba(255,255,255,0.10)",
   },
   avatarSmText: {
-    fontWeight: "800",
-    color: "#2b4cff",
+    fontWeight: "900",
+    color: "rgba(255,255,255,0.85)",
+    fontSize: 12,
   },
   personName: {
-    fontSize: 15,
-    fontWeight: "700",
+    fontSize: 14,
+    fontWeight: "900",
+    color: "rgba(255,255,255,0.92)",
   },
   personSub: {
     marginTop: 2,
     fontSize: 12,
-    color: "#666",
+    color: "rgba(255,255,255,0.60)",
+    fontWeight: "800",
+  },
+
+  secondaryBtn: {
+    marginTop: 14,
+    height: 54,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+  },
+  secondaryBtnText: {
+    color: "rgba(255,255,255,0.85)",
+    fontSize: 16,
+    fontWeight: "900",
   },
 });
