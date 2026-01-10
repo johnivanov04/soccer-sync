@@ -1,5 +1,5 @@
 // app/(app)/match/create.tsx
-import DateTimePicker from "@react-native-community/datetimepicker";
+import DateTimePicker, { DateTimePickerAndroid } from "@react-native-community/datetimepicker";
 import { useRouter } from "expo-router";
 import { addDoc, collection, doc, getDoc, serverTimestamp } from "firebase/firestore";
 import React, { useEffect, useMemo, useState } from "react";
@@ -7,6 +7,7 @@ import {
   ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -20,13 +21,37 @@ import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
 
 function computeRsvpDeadline(start: Date) {
-  // default: 24h before start
   const d = new Date(start.getTime() - 24 * 60 * 60 * 1000);
-  // if that deadline is already in the past, set it a little into the future
   if (d.getTime() < Date.now()) {
     return new Date(Date.now() + 15 * 60 * 1000);
   }
   return d;
+}
+
+function openAndroidDateTimePicker(initial: Date, onPicked: (d: Date | null) => void) {
+  DateTimePickerAndroid.open({
+    value: initial,
+    mode: "date",
+    is24Hour: false,
+    onChange: (event, selectedDate) => {
+      if (event.type === "dismissed" || !selectedDate) return onPicked(null);
+
+      const base = new Date(initial);
+      base.setFullYear(selectedDate.getFullYear(), selectedDate.getMonth(), selectedDate.getDate());
+
+      DateTimePickerAndroid.open({
+        value: base,
+        mode: "time",
+        is24Hour: false,
+        onChange: (event2, selectedTime) => {
+          if (event2.type === "dismissed" || !selectedTime) return onPicked(null);
+
+          base.setHours(selectedTime.getHours(), selectedTime.getMinutes(), 0, 0);
+          onPicked(base);
+        },
+      });
+    },
+  });
 }
 
 export default function CreateMatchScreen() {
@@ -34,7 +59,10 @@ export default function CreateMatchScreen() {
   const { user } = useAuth();
 
   const [date, setDate] = useState<Date>(() => new Date(Date.now() + 60 * 60 * 1000));
-  const [showPicker, setShowPicker] = useState(false);
+
+  // Picker sheet (iOS)
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [tempDate, setTempDate] = useState<Date>(date);
 
   const [locationText, setLocationText] = useState("");
   const [maxPlayers, setMaxPlayers] = useState("14");
@@ -62,8 +90,6 @@ export default function CreateMatchScreen() {
 
         setTeamLoading(true);
 
-        // NOTE: Your app has moved to memberships as source of truth elsewhere,
-        // but this screen is still using users/{uid}.teamId. Keeping this intact for now.
         const userRef = doc(db, "users", user.uid);
         const userSnap = await getDoc(userRef);
 
@@ -81,7 +107,6 @@ export default function CreateMatchScreen() {
 
         setTeamId(String(tid));
 
-        // Optional: look up team name if you have teams/{teamId}.name
         try {
           const teamRef = doc(db, "teams", String(tid));
           const teamSnap = await getDoc(teamRef);
@@ -131,9 +156,7 @@ export default function CreateMatchScreen() {
     ]);
   };
 
-  const dateText = useMemo(() => {
-    return date.toLocaleString();
-  }, [date]);
+  const dateText = useMemo(() => date.toLocaleString(), [date]);
 
   const deadlineText = useMemo(() => {
     const d = computeRsvpDeadline(date);
@@ -145,13 +168,30 @@ export default function CreateMatchScreen() {
     if (!user?.uid) return false;
     if (!teamId) return false;
     if (!locationText.trim()) return false;
+
     const maxPlayersNum = Number(maxPlayers);
     if (!Number.isFinite(maxPlayersNum) || !Number.isInteger(maxPlayersNum) || maxPlayersNum <= 0)
       return false;
+
     const now = Date.now();
     if (date.getTime() < now - 5 * 60 * 1000) return false;
+
     return true;
   }, [creating, user?.uid, teamId, locationText, maxPlayers, date]);
+
+  const openStartPicker = () => {
+    if (creating) return;
+
+    if (Platform.OS === "ios") {
+      setTempDate(date);
+      setPickerOpen(true);
+      return;
+    }
+
+    openAndroidDateTimePicker(date, (picked) => {
+      if (picked) setDate(picked);
+    });
+  };
 
   const handleCreate = async () => {
     if (!user?.uid) {
@@ -285,19 +325,16 @@ export default function CreateMatchScreen() {
     );
   }
 
+  const tempDeadlineText = computeRsvpDeadline(tempDate).toLocaleString();
+
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.screen}>
-        {/* Background */}
         <View style={styles.bg}>
           <View style={styles.pitchLines} />
         </View>
 
-        <KeyboardAvoidingView
-          style={{ flex: 1 }}
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
-        >
-          {/* ✅ Scroll enabled */}
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <ScrollView
             style={{ flex: 1 }}
             contentInsetAdjustmentBehavior="automatic"
@@ -305,7 +342,6 @@ export default function CreateMatchScreen() {
             keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
             contentContainerStyle={styles.scrollContent}
           >
-            {/* Header */}
             <View style={styles.header}>
               <Text style={styles.h1}>Create match</Text>
               <Text style={styles.subtleText}>Set the details and publish to your squad.</Text>
@@ -317,12 +353,10 @@ export default function CreateMatchScreen() {
               )}
             </View>
 
-            {/* Form */}
             <View style={styles.card}>
-              {/* Date & Time */}
               <Text style={styles.label}>Date & time</Text>
               <Pressable
-                onPress={() => setShowPicker(true)}
+                onPress={openStartPicker}
                 disabled={creating}
                 style={({ pressed }) => [
                   styles.inputRow,
@@ -337,18 +371,6 @@ export default function CreateMatchScreen() {
                 <Text style={styles.chev}>›</Text>
               </Pressable>
 
-              {showPicker && (
-                <DateTimePicker
-                  value={date}
-                  mode="datetime"
-                  onChange={(event, selectedDate) => {
-                    setShowPicker(false);
-                    if (selectedDate) setDate(selectedDate);
-                  }}
-                />
-              )}
-
-              {/* Location */}
               <Text style={[styles.label, { marginTop: 14 }]}>Location</Text>
               <View style={styles.inputRow}>
                 <Text style={styles.icon}>📍</Text>
@@ -362,7 +384,6 @@ export default function CreateMatchScreen() {
                 />
               </View>
 
-              {/* Max players */}
               <Text style={[styles.label, { marginTop: 14 }]}>Max players</Text>
               <View style={styles.inputRow}>
                 <Text style={styles.icon}>👥</Text>
@@ -378,7 +399,6 @@ export default function CreateMatchScreen() {
               </View>
               <Text style={styles.helper}>Tip: use 10–14 for small-sided, 16–22 for full field.</Text>
 
-              {/* Description */}
               <Text style={[styles.label, { marginTop: 14 }]}>Description (optional)</Text>
               <View style={[styles.inputRow, { alignItems: "flex-start", paddingVertical: 12 }]}>
                 <Text style={[styles.icon, { marginTop: 2 }]}>📝</Text>
@@ -393,7 +413,6 @@ export default function CreateMatchScreen() {
                 />
               </View>
 
-              {/* Actions */}
               <Pressable
                 onPress={handleCreate}
                 disabled={!canPublish}
@@ -421,6 +440,53 @@ export default function CreateMatchScreen() {
             <Text style={styles.footer}>⚽ Pro tip: put “bring a white & dark shirt” in the notes.</Text>
           </ScrollView>
         </KeyboardAvoidingView>
+
+        {/* iOS bottom-sheet picker */}
+        <Modal
+          transparent
+          visible={pickerOpen}
+          animationType="fade"
+          onRequestClose={() => setPickerOpen(false)}
+        >
+          <View style={styles.modalRoot}>
+            <Pressable style={styles.backdrop} onPress={() => setPickerOpen(false)} />
+
+            <View style={styles.sheetWrap}>
+              <View style={styles.sheet}>
+                <View style={styles.sheetHeader}>
+                  <Pressable onPress={() => setPickerOpen(false)} style={styles.sheetBtn}>
+                    <Text style={styles.sheetBtnText}>Cancel</Text>
+                  </Pressable>
+
+                  <Text style={styles.sheetTitle}>Date & time</Text>
+
+                  <Pressable
+                    onPress={() => {
+                      setDate(tempDate);
+                      setPickerOpen(false);
+                    }}
+                    style={styles.sheetBtn}
+                  >
+                    <Text style={styles.sheetBtnTextStrong}>Done</Text>
+                  </Pressable>
+                </View>
+
+                <View style={styles.sheetBody}>
+                  <DateTimePicker
+                    value={tempDate}
+                    mode="datetime"
+                    display="spinner"
+                    themeVariant="dark"
+                    onChange={(_, selected) => {
+                      if (selected) setTempDate(selected);
+                    }}
+                  />
+                  <Text style={styles.sheetHint}>RSVP deadline will default to {tempDeadlineText}</Text>
+                </View>
+              </View>
+            </View>
+          </View>
+        </Modal>
       </View>
     </SafeAreaView>
   );
@@ -430,18 +496,9 @@ const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: "#052b22" },
   screen: { flex: 1, backgroundColor: "#052b22" },
 
-  // Background
-  bg: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "#052b22",
-  },
-  pitchLines: {
-    ...StyleSheet.absoluteFillObject,
-    opacity: 0.32,
-    backgroundColor: "transparent",
-  },
+  bg: { ...StyleSheet.absoluteFillObject, backgroundColor: "#052b22" },
+  pitchLines: { ...StyleSheet.absoluteFillObject, opacity: 0.32, backgroundColor: "transparent" },
 
-  // ✅ Scroll container
   scrollContent: {
     paddingHorizontal: 18,
     paddingTop: 12,
@@ -449,21 +506,10 @@ const styles = StyleSheet.create({
     flexGrow: 1,
   },
 
-  // Centered shells (loading / no team)
-  centerWrap: {
-    flex: 1,
-    justifyContent: "center",
-  },
+  centerWrap: { flex: 1, justifyContent: "center" },
 
-  header: {
-    marginBottom: 12,
-  },
-  h1: {
-    fontSize: 34,
-    fontWeight: "900",
-    color: "white",
-    letterSpacing: 0.2,
-  },
+  header: { marginBottom: 12 },
+  h1: { fontSize: 34, fontWeight: "900", color: "white", letterSpacing: 0.2 },
   subtleText: {
     marginTop: 6,
     fontSize: 15,
@@ -481,11 +527,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.12)",
   },
-  teamPillText: {
-    color: "rgba(255,255,255,0.85)",
-    fontWeight: "900",
-    fontSize: 13,
-  },
+  teamPillText: { color: "rgba(255,255,255,0.85)", fontWeight: "900", fontSize: 13 },
 
   card: {
     marginTop: 10,
@@ -524,29 +566,10 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.10)",
   },
   icon: { fontSize: 18, marginRight: 10, opacity: 0.9 },
-  input: {
-    flex: 1,
-    color: "white",
-    fontSize: 16,
-    fontWeight: "800",
-  },
-  valueText: {
-    color: "white",
-    fontSize: 16,
-    fontWeight: "900",
-  },
-  helper: {
-    marginTop: 4,
-    color: "rgba(255,255,255,0.55)",
-    fontSize: 12,
-    fontWeight: "800",
-  },
-  chev: {
-    marginLeft: 10,
-    color: "rgba(255,255,255,0.6)",
-    fontSize: 22,
-    fontWeight: "900",
-  },
+  input: { flex: 1, color: "white", fontSize: 16, fontWeight: "800" },
+  valueText: { color: "white", fontSize: 16, fontWeight: "900" },
+  helper: { marginTop: 4, color: "rgba(255,255,255,0.55)", fontSize: 12, fontWeight: "800" },
+  chev: { marginLeft: 10, color: "rgba(255,255,255,0.6)", fontSize: 22, fontWeight: "900" },
 
   primaryBtn: {
     marginTop: 18,
@@ -556,15 +579,8 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: "#1b7f5a",
   },
-  primaryBtnDisabled: {
-    opacity: 0.55,
-  },
-  primaryBtnText: {
-    color: "#04130f",
-    fontSize: 18,
-    fontWeight: "900",
-    textTransform: "capitalize",
-  },
+  primaryBtnDisabled: { opacity: 0.55 },
+  primaryBtnText: { color: "#04130f", fontSize: 18, fontWeight: "900", textTransform: "capitalize" },
 
   secondaryBtn: {
     marginTop: 12,
@@ -576,17 +592,34 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.10)",
   },
-  secondaryBtnText: {
-    color: "rgba(255,255,255,0.85)",
-    fontSize: 16,
-    fontWeight: "900",
-  },
+  secondaryBtnText: { color: "rgba(255,255,255,0.85)", fontSize: 16, fontWeight: "900" },
 
-  footer: {
-    marginTop: 14,
-    textAlign: "center",
-    color: "rgba(255,255,255,0.55)",
-    fontSize: 13,
-    fontWeight: "800",
+  footer: { marginTop: 14, textAlign: "center", color: "rgba(255,255,255,0.55)", fontSize: 13, fontWeight: "800" },
+
+  // Modal sheet
+  modalRoot: { flex: 1, justifyContent: "flex-end" },
+  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.45)" },
+  sheetWrap: { paddingHorizontal: 12, paddingBottom: 12 },
+  sheet: {
+    borderRadius: 20,
+    overflow: "hidden",
+    backgroundColor: "rgba(10, 16, 25, 0.98)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
   },
+  sheetHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.10)",
+  },
+  sheetTitle: { color: "white", fontWeight: "900", fontSize: 16 },
+  sheetBtn: { paddingVertical: 6, paddingHorizontal: 8 },
+  sheetBtnText: { color: "rgba(255,255,255,0.75)", fontWeight: "900", fontSize: 14 },
+  sheetBtnTextStrong: { color: "white", fontWeight: "900", fontSize: 14 },
+  sheetBody: { paddingHorizontal: 12, paddingBottom: 14, paddingTop: 10 },
+  sheetHint: { marginTop: 10, color: "rgba(255,255,255,0.60)", fontSize: 12, fontWeight: "800" },
 });
