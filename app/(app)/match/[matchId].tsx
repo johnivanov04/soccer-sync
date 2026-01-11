@@ -365,8 +365,15 @@ export default function MatchDetailScreen() {
             (mine?.status === "yes" && (mine?.isWaitlisted ?? false)) ?? false;
 
           if (prevWaitlistedRef.current !== null) {
-            if (prevWaitlistedRef.current === true && nowWaitlisted === false && mine?.status === "yes") {
-              Alert.alert("You’re in! ✅", "A spot opened up — you’re now confirmed for the match.");
+            if (
+              prevWaitlistedRef.current === true &&
+              nowWaitlisted === false &&
+              mine?.status === "yes"
+            ) {
+              Alert.alert(
+                "You’re in! ✅",
+                "A spot opened up — you’re now confirmed for the match."
+              );
             }
           }
 
@@ -426,11 +433,22 @@ export default function MatchDetailScreen() {
     return nowTick > deadlineAt.getTime();
   }, [deadlineAt, nowTick]);
 
-  const rsvpDisabledReason =
-    isCancelled ? "Match cancelled" : isPlayed ? "Match already played" : isRsvpClosed ? "RSVP closed" : null;
+  const rsvpDisabledReason = isCancelled
+    ? "Match cancelled"
+    : isPlayed
+    ? "Match already played"
+    : isRsvpClosed
+    ? "RSVP closed"
+    : null;
 
-  const going = useMemo(() => rsvps.filter((r) => r.status === "yes" && !r.isWaitlisted), [rsvps]);
-  const waitlist = useMemo(() => rsvps.filter((r) => r.status === "yes" && r.isWaitlisted), [rsvps]);
+  const going = useMemo(
+    () => rsvps.filter((r) => r.status === "yes" && !r.isWaitlisted),
+    [rsvps]
+  );
+  const waitlist = useMemo(
+    () => rsvps.filter((r) => r.status === "yes" && r.isWaitlisted),
+    [rsvps]
+  );
 
   const goingSorted = useMemo(() => {
     const copy = [...going];
@@ -461,7 +479,9 @@ export default function MatchDetailScreen() {
   const deadlineMs = deadlineAt ? deadlineAt.getTime() - nowTick : null;
 
   const startLabel =
-    startMs >= 0 ? `Starts in ${formatCountdown(startMs)}` : `Started ${formatCountdown(-startMs)} ago`;
+    startMs >= 0
+      ? `Starts in ${formatCountdown(startMs)}`
+      : `Started ${formatCountdown(-startMs)} ago`;
 
   const rsvpLabel = deadlineAt
     ? deadlineMs !== null && deadlineMs >= 0
@@ -655,7 +675,10 @@ export default function MatchDetailScreen() {
       });
     } catch (e: any) {
       console.error("Calendar export error", e);
-      Alert.alert("Couldn’t add to calendar", e?.message ?? "Unknown error. Did you allow calendar permissions?");
+      Alert.alert(
+        "Couldn’t add to calendar",
+        e?.message ?? "Unknown error. Did you allow calendar permissions?"
+      );
     } finally {
       setExportingCalendar(false);
     }
@@ -708,7 +731,10 @@ export default function MatchDetailScreen() {
     );
   }
 
-  const headerDate = `${startAt.toLocaleDateString()} ${startAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  const headerDate = `${startAt.toLocaleDateString()} ${startAt.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  })}`;
 
   const disabledYesMaybe = !!rsvpDisabledReason;
   const showNotes = !!match.description?.trim();
@@ -718,7 +744,11 @@ export default function MatchDetailScreen() {
     statusText === "Cancelled" ? "bad" : statusText === "Played" ? "warn" : "neutral";
 
   const spotsLabel =
-    maxPlayers > 0 && spotsLeft !== null ? (spotsLeft === 0 ? "Full" : `${spotsLeft} spot${spotsLeft === 1 ? "" : "s"} left`) : null;
+    maxPlayers > 0 && spotsLeft !== null
+      ? spotsLeft === 0
+        ? "Full"
+        : `${spotsLeft} spot${spotsLeft === 1 ? "" : "s"} left`
+      : null;
 
   return renderScreen(
     <>
@@ -744,7 +774,8 @@ export default function MatchDetailScreen() {
         </View>
 
         <Text style={styles.metaLine}>
-          {going.length}/{match.maxPlayers ?? "?"} going{waitlist.length > 0 ? ` • ${waitlist.length} waitlist` : ""}
+          {going.length}/{match.maxPlayers ?? "?"} going
+          {waitlist.length > 0 ? ` • ${waitlist.length} waitlist` : ""}
         </Text>
 
         {rsvpDisabledReason && <Text style={styles.dangerText}>{rsvpDisabledReason}</Text>}
@@ -894,6 +925,20 @@ export default function MatchDetailScreen() {
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Host tools</Text>
 
+          {/* ✅ UPDATED: Complete match -> attendance + minutes */}
+          <ActionRow
+            icon={isPlayed ? "📝" : "✅"}
+            title={isPlayed ? "Edit attendance + minutes" : "Complete match"}
+            subtitle="Confirm who attended and assign minutes (updates Stats)"
+            onPress={() =>
+              router.push({
+                pathname: "/(app)/match/complete/[matchId]",
+                params: { matchId: String(matchIdStr) },
+              })
+            }
+            disabled={isCancelled}
+          />
+
           <ActionRow
             icon="✏️"
             title="Edit match details"
@@ -904,13 +949,6 @@ export default function MatchDetailScreen() {
                 params: { matchId: String(matchIdStr) },
               })
             }
-          />
-
-          <ActionRow
-            icon="✅"
-            title="Mark as played"
-            subtitle="Locks RSVPs + marks match complete"
-            onPress={() => confirmStatusChange("played")}
           />
 
           <ActionRow
@@ -1069,7 +1107,12 @@ const styles = StyleSheet.create({
   actionIcon: { fontSize: 18, opacity: 0.95 },
   actionTitle: { color: "white", fontWeight: "900", fontSize: 15 },
   actionTitleDestructive: { color: "rgba(255,200,200,0.95)" },
-  actionSub: { marginTop: 3, color: "rgba(255,255,255,0.55)", fontWeight: "800", fontSize: 12 },
+  actionSub: {
+    marginTop: 3,
+    color: "rgba(255,255,255,0.55)",
+    fontWeight: "800",
+    fontSize: 12,
+  },
   actionChev: { color: "rgba(255,255,255,0.60)", fontSize: 22, fontWeight: "900" },
 
   rsvpRow: {
