@@ -117,7 +117,7 @@ async function loadUserProfilesByUids(uids: string[]) {
 
   for (let i = 0; i < uniq.length; i += CHUNK) {
     const slice = uniq.slice(i, i + CHUNK);
-    const usersCol = collection(db, "users");
+    const usersCol = collection(db, "publicUsers");
     const qy = query(usersCol, where(documentId(), "in", slice));
     const snap = await getDocs(qy);
 
