@@ -16,7 +16,7 @@ import {
   setDoc,
   where,
   type DocumentData,
-  type QueryDocumentSnapshot,
+  type QueryDocumentSnapshot
 } from "firebase/firestore";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -30,8 +30,6 @@ import {
   Text,
   TextInput,
   View,
-  type NativeScrollEvent,
-  type NativeSyntheticEvent,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../../../../src/context/AuthContext";
@@ -39,6 +37,7 @@ import { db } from "../../../../src/firebaseConfig";
 import { onSnapshotSafe } from "../../../../src/firestoreSafe";
 
 type QDoc = QueryDocumentSnapshot<DocumentData>;
+
 type ChatMessage = {
   id: string;
   matchId: string;
@@ -126,7 +125,8 @@ function avatarUri(photoURL?: string | null, versionMs?: number | null) {
   return photoURL.includes("?") ? `${photoURL}&v=${v}` : `${photoURL}?v=${v}`;
 }
 
-async function loadUserProfilesByUids(uids: string[]) {
+// ✅ Read from publicUsers (NOT users) to avoid permission issues
+async function loadPublicUserProfilesByUids(uids: string[]) {
   const uniq = Array.from(new Set(uids.filter(Boolean)));
   const out = new Map<string, UserProfileMini>();
   if (uniq.length === 0) return out;
@@ -134,9 +134,9 @@ async function loadUserProfilesByUids(uids: string[]) {
   const CHUNK = 10; // Firestore "in" limit
   for (let i = 0; i < uniq.length; i += CHUNK) {
     const slice = uniq.slice(i, i + CHUNK);
-    const usersCol = collection(db, "users");
-    const q = query(usersCol, where(documentId(), "in", slice));
-    const snap = await getDocs(q);
+    const col = collection(db, "publicUsers");
+    const qy = query(col, where(documentId(), "in", slice));
+    const snap = await getDocs(qy);
 
     for (const d of snap.docs) {
       const data = d.data() as any;
@@ -163,6 +163,31 @@ async function loadUserProfilesByUids(uids: string[]) {
   }
 
   return out;
+}
+
+// ✅ Ensure my public profile doc exists (so others can render me)
+async function upsertMyPublicProfile(uid: string, fallbackName?: string | null) {
+  try {
+    // I can always read my own private user doc
+    const meSnap = await getDoc(doc(db, "users", uid));
+    const data = meSnap.exists() ? (meSnap.data() as any) : {};
+
+    const displayName = String(data?.displayName ?? fallbackName ?? "Player");
+    const photoURL = data?.photoURL ? String(data.photoURL) : null;
+
+    await setDoc(
+      doc(db, "publicUsers", uid),
+      {
+        displayName,
+        photoURL,
+        // optional; if you later track photoUpdatedAtMs on avatar upload, set it there too
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+  } catch {
+    // ignore
+  }
 }
 
 export default function MatchChatScreen() {
@@ -196,6 +221,21 @@ export default function MatchChatScreen() {
 
   const META_ON_FIRST_MESSAGE_IN_CLUSTER = false;
   const CLUSTER_MINUTES = 5;
+
+  // ✅ Scroll-to-bottom polish
+  const [atBottom, setAtBottom] = useState(true);
+  const [unseenCount, setUnseenCount] = useState(0);
+  const lastMsgIdRef = useRef<string | null>(null);
+
+  const isTyping = text.trim().length > 0;
+
+  const scrollToBottom = useCallback((animated: boolean) => {
+    requestAnimationFrame(() => {
+      listRef.current?.scrollToEnd({ animated });
+    });
+    setUnseenCount(0);
+    setAtBottom(true);
+  }, []);
 
   // -------------------------------
   // ✅ Mark-as-read (SEQ + TIME)
@@ -250,61 +290,6 @@ export default function MatchChatScreen() {
     });
     return () => sub.remove();
   }, [scheduleMarkChatRead]);
-
-  // -------------------------------
-  // ✅ Scroll-to-bottom + unseen count
-  // -------------------------------
-  const [atBottom, setAtBottom] = useState(true);
-  const [unseenCount, setUnseenCount] = useState(0);
-  const contentHRef = useRef(0);
-  const layoutHRef = useRef(0);
-  const yRef = useRef(0);
-  const prevMsgCountRef = useRef(0);
-
-  const updateAtBottom = useCallback(() => {
-    const contentH = contentHRef.current;
-    const layoutH = layoutHRef.current;
-    const y = yRef.current;
-
-    if (!contentH || !layoutH) return;
-
-    const dist = contentH - (y + layoutH);
-    const isBottom = dist <= 90; // threshold
-    setAtBottom(isBottom);
-    if (isBottom) setUnseenCount(0);
-  }, []);
-
-  const scrollToBottom = useCallback(
-    (animated = true) => {
-      requestAnimationFrame(() => {
-        listRef.current?.scrollToEnd({ animated });
-      });
-      setUnseenCount(0);
-      setAtBottom(true);
-      scheduleMarkChatRead();
-    },
-    [scheduleMarkChatRead]
-  );
-
-  // -------------------------------
-  // ✅ Local typing indicator (just polish)
-  // -------------------------------
-  const [inputFocused, setInputFocused] = useState(false);
-  const showTyping = inputFocused && text.trim().length > 0 && !sending;
-
-  const [typingDots, setTypingDots] = useState("");
-  useEffect(() => {
-    if (!showTyping) {
-      setTypingDots("");
-      return;
-    }
-    let i = 0;
-    const t = setInterval(() => {
-      i = (i + 1) % 4; // "", ".", "..", "..."
-      setTypingDots(".".repeat(i));
-    }, 420);
-    return () => clearInterval(t);
-  }, [showTyping]);
 
   // ✅ Subscribe to match doc to get teamId + lastMessageSeq
   useEffect(() => {
@@ -416,6 +401,12 @@ export default function MatchChatScreen() {
     }
   }, [user?.uid, matchIdStr, muted, scheduleMarkChatRead]);
 
+  // ✅ Ensure my public profile exists when I open chat
+  useEffect(() => {
+    if (!user?.uid) return;
+    void upsertMyPublicProfile(user.uid, user.email ?? null);
+  }, [user?.uid, user?.email]);
+
   // Subscribe to messages
   useEffect(() => {
     if (!matchIdStr) return;
@@ -452,7 +443,6 @@ export default function MatchChatScreen() {
             userId: String(data.userId ?? ""),
             displayName: String(data.displayName ?? "Someone"),
             text: String(data.text ?? ""),
-            // keep legacy for older clients, but UI will ignore it for avatar rendering
             photoURL: (data.photoURL as string) ?? null,
             createdAt: data.createdAt,
             stableMs,
@@ -481,7 +471,7 @@ export default function MatchChatScreen() {
     return () => unsub();
   }, [matchIdStr]);
 
-  // ✅ Option A: load user profiles for all message senders (avatars)
+  // ✅ Load public profiles for senders (avatars)
   useEffect(() => {
     const uids = Array.from(new Set(messages.map((m) => m.userId).filter(Boolean)));
     if (uids.length === 0) return;
@@ -490,14 +480,14 @@ export default function MatchChatScreen() {
 
     (async () => {
       try {
-        const map = await loadUserProfilesByUids(uids);
+        const map = await loadPublicUserProfilesByUids(uids);
         if (cancelled) return;
 
         const obj: Record<string, UserProfileMini> = {};
         map.forEach((v, k) => (obj[k] = v));
         setUserProfiles((prev) => ({ ...prev, ...obj }));
       } catch (e) {
-        console.warn("Failed to load user profiles for chat avatars", e);
+        console.warn("Failed to load public user profiles for chat avatars", e);
       }
     })();
 
@@ -516,29 +506,27 @@ export default function MatchChatScreen() {
       didInitialScroll.current = true;
       setAtBottom(true);
       setUnseenCount(0);
-      prevMsgCountRef.current = messages.length;
     });
   }, [messages.length]);
 
-  // If new messages arrive:
-  // - when at bottom => keep you pinned to bottom
-  // - when not at bottom => show "scroll to bottom" + count
+  // Keep pinned to bottom if you're already at bottom
   useEffect(() => {
-    const prev = prevMsgCountRef.current;
-    const curr = messages.length;
-    prevMsgCountRef.current = curr;
-
     if (!didInitialScroll.current) return;
-    if (curr <= prev) return;
-
-    const added = curr - prev;
-
-    if (atBottom) {
-      scrollToBottom(true);
-    } else {
-      setUnseenCount((c) => c + added);
-    }
+    if (!atBottom) return;
+    if (messages.length === 0) return;
+    scrollToBottom(false);
   }, [messages.length, atBottom, scrollToBottom]);
+
+  // Unseen count when new messages arrive while you're scrolled up
+  useEffect(() => {
+    const lastId = messages[messages.length - 1]?.id ?? null;
+    if (!lastId) return;
+
+    if (lastMsgIdRef.current && lastMsgIdRef.current !== lastId && !atBottom) {
+      setUnseenCount((c) => Math.min(99, c + 1));
+    }
+    lastMsgIdRef.current = lastId;
+  }, [messages, atBottom]);
 
   const canSend = useMemo(() => {
     return (
@@ -578,7 +566,17 @@ export default function MatchChatScreen() {
         // ignore
       }
 
-      // We still store photoURL for backwards compat, but UI renders from users/{uid}
+      // Ensure public profile is updated too (best-effort)
+      void setDoc(
+        doc(db, "publicUsers", user.uid),
+        {
+          displayName,
+          photoURL: photoURL ?? null,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+
       await addDoc(collection(db, "matchMessages"), {
         matchId: matchIdStr,
         teamId: matchTeamId,
@@ -592,8 +590,10 @@ export default function MatchChatScreen() {
       setText("");
 
       requestAnimationFrame(() => {
-        scrollToBottom(true);
+        listRef.current?.scrollToEnd({ animated: true });
       });
+
+      scheduleMarkChatRead();
     } catch (e) {
       console.error("Send message error:", e);
       Alert.alert("Error", "Could not send message.");
@@ -604,15 +604,14 @@ export default function MatchChatScreen() {
 
   const handleBack = () => router.back();
 
-  // ✅ Background now covers safe areas too (fixes top/bottom tint)
   const renderShell = (content: React.ReactNode) => {
     return (
       <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
+        {/* ✅ Background covers safe areas */}
         <View pointerEvents="none" style={StyleSheet.absoluteFillObject}>
           <View style={styles.bg} />
           <View style={styles.pitchLines} />
         </View>
-
         {content}
       </SafeAreaView>
     );
@@ -623,10 +622,7 @@ export default function MatchChatScreen() {
       <View style={styles.centerWrap}>
         <View style={styles.stateCard}>
           <Text style={styles.stateTitle}>Missing match id</Text>
-          <Pressable
-            onPress={handleBack}
-            style={({ pressed }) => [styles.secondaryBtn, pressed && styles.pressed]}
-          >
+          <Pressable onPress={handleBack} style={({ pressed }) => [styles.secondaryBtn, pressed && styles.pressed]}>
             <Text style={styles.secondaryBtnText}>Back</Text>
           </Pressable>
         </View>
@@ -651,21 +647,13 @@ export default function MatchChatScreen() {
         <View style={styles.stateCard}>
           <Text style={styles.stateTitle}>Match not found</Text>
           <Text style={styles.stateSubtle}>You may not have access, or it was deleted.</Text>
-          <Pressable
-            onPress={handleBack}
-            style={({ pressed }) => [styles.secondaryBtn, pressed && styles.pressed]}
-          >
+          <Pressable onPress={handleBack} style={({ pressed }) => [styles.secondaryBtn, pressed && styles.pressed]}>
             <Text style={styles.secondaryBtnText}>Back</Text>
           </Pressable>
         </View>
       </View>
     );
   }
-
-  const onScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    yRef.current = e.nativeEvent.contentOffset.y;
-    updateAtBottom();
-  };
 
   return renderShell(
     <KeyboardAvoidingView
@@ -707,168 +695,161 @@ export default function MatchChatScreen() {
         </Pressable>
       </View>
 
-      {/* Messages */}
-      <FlatList
-        ref={listRef}
-        style={{ flex: 1 }}
-        contentContainerStyle={styles.messagesContainer}
-        data={messages}
-        keyExtractor={(m) => m.id}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="on-drag"
-        scrollEventThrottle={16}
-        onScroll={onScroll}
-        onLayout={(e) => {
-          layoutHRef.current = e.nativeEvent.layout.height;
-          updateAtBottom();
-        }}
-        onContentSizeChange={(_, h) => {
-          contentHRef.current = h;
-          updateAtBottom();
-        }}
-        ListEmptyComponent={
-          <View style={styles.emptyWrap}>
-            <Text style={styles.emptyTitle}>No messages yet</Text>
-            <Text style={styles.emptySub}>Be the first one to say hi 👋</Text>
-          </View>
-        }
-        renderItem={({ item, index }) => {
-          const mine = item.userId === user?.uid;
+      {/* Messages + FAB */}
+      <View style={{ flex: 1 }}>
+        <FlatList
+          ref={listRef}
+          style={{ flex: 1 }}
+          contentContainerStyle={styles.messagesContainer}
+          data={messages}
+          keyExtractor={(m) => m.id}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+          scrollEventThrottle={16}
+          onScroll={(e) => {
+            const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+            const distFromBottom = contentSize.height - (contentOffset.y + layoutMeasurement.height);
+            const nextAtBottom = distFromBottom < 40;
 
-          // ✅ Option A: derive avatar from users/{uid}
-          const prof = item.userId ? userProfiles[item.userId] : undefined;
-          const nameForInitials = item.displayName || prof?.displayName || "Someone";
-          const initials = initialsFromName(nameForInitials);
-          const uri = avatarUri(prof?.photoURL ?? null, prof?.photoVersionMs ?? null);
-
-          const prev = messages[index - 1];
-          const next = messages[index + 1];
-
-          const tCur = item.stableMs;
-          const tPrev = prev?.stableMs ?? 0;
-          const tNext = next?.stableMs ?? 0;
-
-          const joinsPrev =
-            !!prev &&
-            prev.userId === item.userId &&
-            tCur > 0 &&
-            tPrev > 0 &&
-            minutesDiffMs(tCur, tPrev) <= CLUSTER_MINUTES;
-
-          const joinsNext =
-            !!next &&
-            next.userId === item.userId &&
-            tCur > 0 &&
-            tNext > 0 &&
-            minutesDiffMs(tCur, tNext) <= CLUSTER_MINUTES;
-
-          const isClusterStart = !joinsPrev;
-          const isClusterEnd = !joinsNext;
-
-          const showMeta = META_ON_FIRST_MESSAGE_IN_CLUSTER ? isClusterStart : isClusterEnd;
-
-          const showDateSeparator = tCur > 0 && (!prev || !isSameDayMs(tCur, tPrev));
-          const timeLabel = showMeta ? formatTimeMs(tCur) : "";
-          const spacing = joinsPrev ? 4 : 12;
-
-          return (
-            <View style={{ marginTop: spacing }}>
-              {showDateSeparator && (
-                <View style={styles.dateSepWrap}>
-                  <View style={styles.dateSepPill}>
-                    <Text style={styles.dateSepText}>{formatDayLabelMs(tCur)}</Text>
-                  </View>
-                </View>
-              )}
-
-              <View style={[styles.row, mine ? styles.rowMine : styles.rowOther]}>
-                {!mine ? (
-                  showMeta ? (
-                    <View style={styles.avatarWrap}>
-                      {uri ? (
-                        <Image source={{ uri }} style={styles.avatarImg} cachePolicy="none" />
-                      ) : (
-                        <View style={styles.avatarFallback}>
-                          <Text style={styles.avatarText}>{initials}</Text>
-                        </View>
-                      )}
-                    </View>
-                  ) : (
-                    <View style={styles.avatarSpacer} />
-                  )
-                ) : (
-                  <View style={styles.avatarSpacer} />
-                )}
-
-                <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleOther]}>
-                  {!mine && showMeta && <Text style={styles.bubbleName}>{item.displayName}</Text>}
-                  <Text style={styles.bubbleText}>{item.text}</Text>
-                  {showMeta && !!timeLabel && <Text style={styles.timeText}>{timeLabel}</Text>}
-                </View>
-
-                {mine ? (
-                  showMeta ? (
-                    <View style={styles.avatarWrap}>
-                      {uri ? (
-                        <Image source={{ uri }} style={styles.avatarImg} cachePolicy="none" />
-                      ) : (
-                        <View style={styles.avatarFallback}>
-                          <Text style={styles.avatarText}>{initials}</Text>
-                        </View>
-                      )}
-                    </View>
-                  ) : (
-                    <View style={styles.avatarSpacer} />
-                  )
-                ) : (
-                  <View style={styles.avatarSpacer} />
-                )}
-              </View>
+            if (nextAtBottom !== atBottom) setAtBottom(nextAtBottom);
+            if (nextAtBottom) {
+              if (unseenCount !== 0) setUnseenCount(0);
+              scheduleMarkChatRead();
+            }
+          }}
+          ListEmptyComponent={
+            <View style={styles.emptyWrap}>
+              <Text style={styles.emptyTitle}>No messages yet</Text>
+              <Text style={styles.emptySub}>Be the first one to say hi 👋</Text>
             </View>
-          );
-        }}
-      />
+          }
+          renderItem={({ item, index }) => {
+            const mine = item.userId === user?.uid;
 
-      {/* Scroll-to-bottom button (shows when you're not at bottom) */}
-      {!atBottom && messages.length > 0 && (
-        <View pointerEvents="box-none" style={styles.fabWrap}>
+            const prof = item.userId ? userProfiles[item.userId] : undefined;
+            const nameForInitials = item.displayName || prof?.displayName || "Someone";
+            const initials = initialsFromName(nameForInitials);
+            const uri = avatarUri(prof?.photoURL ?? null, prof?.photoVersionMs ?? null);
+
+            const prev = messages[index - 1];
+            const next = messages[index + 1];
+
+            const tCur = item.stableMs;
+            const tPrev = prev?.stableMs ?? 0;
+            const tNext = next?.stableMs ?? 0;
+
+            const joinsPrev =
+              !!prev &&
+              prev.userId === item.userId &&
+              tCur > 0 &&
+              tPrev > 0 &&
+              minutesDiffMs(tCur, tPrev) <= CLUSTER_MINUTES;
+
+            const joinsNext =
+              !!next &&
+              next.userId === item.userId &&
+              tCur > 0 &&
+              tNext > 0 &&
+              minutesDiffMs(tCur, tNext) <= CLUSTER_MINUTES;
+
+            const isClusterStart = !joinsPrev;
+            const isClusterEnd = !joinsNext;
+
+            const showMeta = META_ON_FIRST_MESSAGE_IN_CLUSTER ? isClusterStart : isClusterEnd;
+
+            const showDateSeparator = tCur > 0 && (!prev || !isSameDayMs(tCur, tPrev));
+            const timeLabel = showMeta ? formatTimeMs(tCur) : "";
+            const spacing = joinsPrev ? 4 : 12;
+
+            return (
+              <View style={{ marginTop: spacing }}>
+                {showDateSeparator && (
+                  <View style={styles.dateSepWrap}>
+                    <View style={styles.dateSepPill}>
+                      <Text style={styles.dateSepText}>{formatDayLabelMs(tCur)}</Text>
+                    </View>
+                  </View>
+                )}
+
+                <View style={[styles.row, mine ? styles.rowMine : styles.rowOther]}>
+                  {!mine ? (
+                    showMeta ? (
+                      <View style={styles.avatarWrap}>
+                        {uri ? (
+                          <Image source={{ uri }} style={styles.avatarImg} cachePolicy="none" />
+                        ) : (
+                          <View style={styles.avatarFallback}>
+                            <Text style={styles.avatarText}>{initials}</Text>
+                          </View>
+                        )}
+                      </View>
+                    ) : (
+                      <View style={styles.avatarSpacer} />
+                    )
+                  ) : (
+                    <View style={styles.avatarSpacer} />
+                  )}
+
+                  <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleOther]}>
+                    {!mine && showMeta && <Text style={styles.bubbleName}>{item.displayName}</Text>}
+                    <Text style={styles.bubbleText}>{item.text}</Text>
+                    {showMeta && !!timeLabel && <Text style={styles.timeText}>{timeLabel}</Text>}
+                  </View>
+
+                  {mine ? (
+                    showMeta ? (
+                      <View style={styles.avatarWrap}>
+                        {uri ? (
+                          <Image source={{ uri }} style={styles.avatarImg} cachePolicy="none" />
+                        ) : (
+                          <View style={styles.avatarFallback}>
+                            <Text style={styles.avatarText}>{initials}</Text>
+                          </View>
+                        )}
+                      </View>
+                    ) : (
+                      <View style={styles.avatarSpacer} />
+                    )
+                  ) : (
+                    <View style={styles.avatarSpacer} />
+                  )}
+                </View>
+              </View>
+            );
+          }}
+        />
+
+        {!atBottom && messages.length > 0 && (
           <Pressable
             onPress={() => scrollToBottom(true)}
-            style={({ pressed }) => [styles.fab, pressed && styles.pressed]}
-            hitSlop={10}
+            style={({ pressed }) => [
+              styles.scrollFab,
+              pressed && { transform: [{ scale: 0.98 }] },
+            ]}
           >
-            <Text style={styles.fabArrow}>↓</Text>
-            <Text style={styles.fabText}>Bottom</Text>
-            {unseenCount > 0 && (
-              <View style={styles.fabBadge}>
-                <Text style={styles.fabBadgeText}>{unseenCount > 99 ? "99+" : String(unseenCount)}</Text>
-              </View>
-            )}
+            <Text style={styles.scrollFabText}>
+              ↓ {unseenCount > 0 ? `(${unseenCount})` : ""}
+            </Text>
           </Pressable>
-        </View>
-      )}
-
-      {/* Typing indicator (local-only) */}
-      {showTyping && (
-        <View style={styles.typingWrap} pointerEvents="none">
-          <Text style={styles.typingText}>Typing{typingDots}</Text>
-        </View>
-      )}
+        )}
+      </View>
 
       {/* Composer */}
       <View style={styles.composer}>
-        <View style={styles.inputRow}>
-          <TextInput
-            style={styles.input}
-            value={text}
-            onChangeText={setText}
-            placeholder="Message…"
-            placeholderTextColor="rgba(255,255,255,0.40)"
-            maxLength={500}
-            multiline
-            onFocus={() => setInputFocused(true)}
-            onBlur={() => setInputFocused(false)}
-          />
+        <View style={{ flex: 1 }}>
+          {isTyping && <Text style={styles.typingHint}>Typing…</Text>}
+          <View style={styles.inputRow}>
+            <TextInput
+              style={styles.input}
+              value={text}
+              onChangeText={setText}
+              placeholder="Message…"
+              placeholderTextColor="rgba(255,255,255,0.40)"
+              maxLength={500}
+              multiline
+              keyboardAppearance="dark"
+            />
+          </View>
         </View>
 
         <Pressable
@@ -892,7 +873,7 @@ const AVATAR = 32;
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: "#052b22" },
 
-  // Background layers
+  // Background layers (match Create vibe)
   bg: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: "#052b22",
@@ -1054,57 +1035,18 @@ const styles = StyleSheet.create({
   dateSepText: { fontSize: 12, fontWeight: "900", color: "rgba(255,255,255,0.65)" },
 
   // Scroll-to-bottom FAB
-  fabWrap: {
+  scrollFab: {
     position: "absolute",
     right: 14,
-    bottom: 12 + 48 + 12, // composer height-ish + padding
-    zIndex: 20,
-  },
-  fab: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
+    bottom: 14,
     paddingVertical: 10,
     paddingHorizontal: 12,
     borderRadius: 999,
-    backgroundColor: "rgba(10, 16, 25, 0.78)",
+    backgroundColor: "rgba(10, 16, 25, 0.75)",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.12)",
   },
-  fabArrow: { color: "rgba(255,255,255,0.92)", fontWeight: "900", fontSize: 14 },
-  fabText: { color: "rgba(255,255,255,0.92)", fontWeight: "900", fontSize: 13 },
-  fabBadge: {
-    marginLeft: 2,
-    minWidth: 22,
-    height: 22,
-    borderRadius: 11,
-    paddingHorizontal: 6,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(27, 127, 90, 0.95)",
-  },
-  fabBadgeText: { color: "#04130f", fontWeight: "900", fontSize: 12 },
-
-  // Typing indicator (local-only)
-  typingWrap: {
-    position: "absolute",
-    left: 14,
-    right: 14,
-    bottom: 12 + 48 + 12 + 8, // just above composer
-    alignItems: "flex-start",
-    zIndex: 10,
-  },
-  typingText: {
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.07)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.10)",
-    color: "rgba(255,255,255,0.70)",
-    fontWeight: "900",
-    fontSize: 12,
-  },
+  scrollFabText: { color: "rgba(255,255,255,0.9)", fontWeight: "900" },
 
   // Composer
   composer: {
@@ -1119,8 +1061,15 @@ const styles = StyleSheet.create({
     alignItems: "flex-end",
   },
 
+  typingHint: {
+    marginBottom: 6,
+    color: "rgba(255,255,255,0.55)",
+    fontWeight: "800",
+    fontSize: 12,
+    paddingHorizontal: 6,
+  },
+
   inputRow: {
-    flex: 1,
     borderRadius: 18,
     paddingHorizontal: 14,
     paddingVertical: 10,
