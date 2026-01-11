@@ -25,10 +25,10 @@ import {
   FlatList,
   KeyboardAvoidingView,
   Platform,
+  Pressable,
   StyleSheet,
   Text,
   TextInput,
-  TouchableOpacity,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -526,237 +526,371 @@ export default function MatchChatScreen() {
 
   const handleBack = () => router.back();
 
-  if (!matchIdStr) {
+  // ✅ FIX: Paint background at SafeArea level so top/bottom insets match
+  const renderShell = (content: React.ReactNode) => {
     return (
-      <SafeAreaView style={styles.safe} edges={["top"]}>
-        <View style={styles.container}>
-          <Text>Missing match id.</Text>
-          <TouchableOpacity style={styles.backBtn} onPress={handleBack}>
-            <Text style={styles.backBtnText}>Back</Text>
-          </TouchableOpacity>
+      <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
+        <View pointerEvents="none" style={StyleSheet.absoluteFillObject}>
+          <View style={styles.bg} />
+          <View style={styles.pitchLines} />
         </View>
+
+        {content}
       </SafeAreaView>
+    );
+  };
+
+  if (!matchIdStr) {
+    return renderShell(
+      <View style={styles.centerWrap}>
+        <View style={styles.stateCard}>
+          <Text style={styles.stateTitle}>Missing match id</Text>
+          <Pressable
+            onPress={handleBack}
+            style={({ pressed }) => [styles.secondaryBtn, pressed && styles.pressed]}
+          >
+            <Text style={styles.secondaryBtnText}>Back</Text>
+          </Pressable>
+        </View>
+      </View>
     );
   }
 
   if (loading) {
-    return (
-      <SafeAreaView style={styles.safe} edges={["top"]}>
-        <View style={styles.container}>
-          <Text>Loading chat...</Text>
+    return renderShell(
+      <View style={styles.centerWrap}>
+        <View style={styles.stateCard}>
+          <Text style={styles.stateTitle}>Loading chat…</Text>
+          <Text style={styles.stateSubtle}>Pulling messages and match info.</Text>
         </View>
-      </SafeAreaView>
+      </View>
     );
   }
 
   if (!matchTeamId) {
-    return (
-      <SafeAreaView style={styles.safe} edges={["top"]}>
-        <View style={styles.container}>
-          <Text>Match not found.</Text>
-          <TouchableOpacity style={styles.backBtn} onPress={handleBack}>
-            <Text style={styles.backBtnText}>Back</Text>
-          </TouchableOpacity>
+    return renderShell(
+      <View style={styles.centerWrap}>
+        <View style={styles.stateCard}>
+          <Text style={styles.stateTitle}>Match not found</Text>
+          <Text style={styles.stateSubtle}>You may not have access, or it was deleted.</Text>
+          <Pressable
+            onPress={handleBack}
+            style={({ pressed }) => [styles.secondaryBtn, pressed && styles.pressed]}
+          >
+            <Text style={styles.secondaryBtnText}>Back</Text>
+          </Pressable>
         </View>
-      </SafeAreaView>
+      </View>
     );
   }
 
-  return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
-        keyboardVerticalOffset={Platform.OS === "ios" ? 64 : 0}
-      >
-        <View style={styles.header}>
-          <TouchableOpacity
-            onPress={handleBack}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          >
-            <Text style={styles.backText}>‹ Back</Text>
-          </TouchableOpacity>
+  return renderShell(
+    <KeyboardAvoidingView
+      style={{ flex: 1 }}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      keyboardVerticalOffset={Platform.OS === "ios" ? 64 : 0}
+    >
+      {/* Header */}
+      <View style={styles.header}>
+        <Pressable
+          onPress={handleBack}
+          hitSlop={10}
+          style={({ pressed }) => [styles.headerBtn, pressed && styles.pressed]}
+        >
+          <Text style={styles.headerBtnText}>‹ Back</Text>
+        </Pressable>
 
-          <Text style={styles.headerTitle}>Match Chat</Text>
-
-          <TouchableOpacity
-            onPress={toggleMute}
-            disabled={togglingMute}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          >
-            <Text style={[styles.muteText, muted && styles.muteTextOn]}>
-              {togglingMute ? "…" : muted ? "Unmute" : "Mute"}
-            </Text>
-          </TouchableOpacity>
+        <View style={{ flex: 1, alignItems: "center" }}>
+          <Text style={styles.headerTitle}>Match chat</Text>
+          <Text style={styles.headerSub}>
+            {muted ? "Muted (no push notifications)" : "Say hi to your squad"}
+          </Text>
         </View>
 
-        <FlatList
-          ref={listRef}
-          style={{ flex: 1 }}
-          contentContainerStyle={styles.messagesContainer}
-          data={messages}
-          keyExtractor={(m) => m.id}
-          keyboardShouldPersistTaps="handled"
-          keyboardDismissMode="on-drag"
-          ListEmptyComponent={<Text style={styles.emptyText}>No messages yet. Say hi 👋</Text>}
-          renderItem={({ item, index }) => {
-            const mine = item.userId === user?.uid;
+        <Pressable
+          onPress={toggleMute}
+          disabled={togglingMute}
+          hitSlop={10}
+          style={({ pressed }) => [
+            styles.mutePill,
+            muted && styles.mutePillOn,
+            pressed && !togglingMute && styles.pressed,
+            togglingMute && { opacity: 0.7 },
+          ]}
+        >
+          <Text style={[styles.mutePillText, muted && styles.mutePillTextOn]}>
+            {togglingMute ? "…" : muted ? "Unmute" : "Mute"}
+          </Text>
+        </Pressable>
+      </View>
 
-            // ✅ Option A: derive avatar from users/{uid}
-            const prof = item.userId ? userProfiles[item.userId] : undefined;
-            const nameForInitials = item.displayName || prof?.displayName || "Someone";
-            const initials = initialsFromName(nameForInitials);
-            const uri = avatarUri(prof?.photoURL ?? null, prof?.photoVersionMs ?? null);
+      {/* Messages */}
+      <FlatList
+        ref={listRef}
+        style={{ flex: 1 }}
+        contentContainerStyle={styles.messagesContainer}
+        data={messages}
+        keyExtractor={(m) => m.id}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        ListEmptyComponent={
+          <View style={styles.emptyWrap}>
+            <Text style={styles.emptyTitle}>No messages yet</Text>
+            <Text style={styles.emptySub}>Be the first one to say hi 👋</Text>
+          </View>
+        }
+        renderItem={({ item, index }) => {
+          const mine = item.userId === user?.uid;
 
-            const prev = messages[index - 1];
-            const next = messages[index + 1];
+          // ✅ Option A: derive avatar from users/{uid}
+          const prof = item.userId ? userProfiles[item.userId] : undefined;
+          const nameForInitials = item.displayName || prof?.displayName || "Someone";
+          const initials = initialsFromName(nameForInitials);
+          const uri = avatarUri(prof?.photoURL ?? null, prof?.photoVersionMs ?? null);
 
-            const tCur = item.stableMs;
-            const tPrev = prev?.stableMs ?? 0;
-            const tNext = next?.stableMs ?? 0;
+          const prev = messages[index - 1];
+          const next = messages[index + 1];
 
-            const joinsPrev =
-              !!prev &&
-              prev.userId === item.userId &&
-              tCur > 0 &&
-              tPrev > 0 &&
-              minutesDiffMs(tCur, tPrev) <= CLUSTER_MINUTES;
+          const tCur = item.stableMs;
+          const tPrev = prev?.stableMs ?? 0;
+          const tNext = next?.stableMs ?? 0;
 
-            const joinsNext =
-              !!next &&
-              next.userId === item.userId &&
-              tCur > 0 &&
-              tNext > 0 &&
-              minutesDiffMs(tCur, tNext) <= CLUSTER_MINUTES;
+          const joinsPrev =
+            !!prev &&
+            prev.userId === item.userId &&
+            tCur > 0 &&
+            tPrev > 0 &&
+            minutesDiffMs(tCur, tPrev) <= CLUSTER_MINUTES;
 
-            const isClusterStart = !joinsPrev;
-            const isClusterEnd = !joinsNext;
+          const joinsNext =
+            !!next &&
+            next.userId === item.userId &&
+            tCur > 0 &&
+            tNext > 0 &&
+            minutesDiffMs(tCur, tNext) <= CLUSTER_MINUTES;
 
-            const showMeta = META_ON_FIRST_MESSAGE_IN_CLUSTER ? isClusterStart : isClusterEnd;
+          const isClusterStart = !joinsPrev;
+          const isClusterEnd = !joinsNext;
 
-            const showDateSeparator = tCur > 0 && (!prev || !isSameDayMs(tCur, tPrev));
-            const timeLabel = showMeta ? formatTimeMs(tCur) : "";
-            const spacing = joinsPrev ? 3 : 10;
+          const showMeta = META_ON_FIRST_MESSAGE_IN_CLUSTER ? isClusterStart : isClusterEnd;
 
-            return (
-              <View style={{ marginTop: spacing }}>
-                {showDateSeparator && (
-                  <View style={styles.dateSepWrap}>
-                    <View style={styles.dateSepPill}>
-                      <Text style={styles.dateSepText}>{formatDayLabelMs(tCur)}</Text>
-                    </View>
+          const showDateSeparator = tCur > 0 && (!prev || !isSameDayMs(tCur, tPrev));
+          const timeLabel = showMeta ? formatTimeMs(tCur) : "";
+          const spacing = joinsPrev ? 4 : 12;
+
+          return (
+            <View style={{ marginTop: spacing }}>
+              {showDateSeparator && (
+                <View style={styles.dateSepWrap}>
+                  <View style={styles.dateSepPill}>
+                    <Text style={styles.dateSepText}>{formatDayLabelMs(tCur)}</Text>
                   </View>
+                </View>
+              )}
+
+              <View style={[styles.row, mine ? styles.rowMine : styles.rowOther]}>
+                {/* Left avatar for others (only on meta bubble) */}
+                {!mine ? (
+                  showMeta ? (
+                    <View style={styles.avatarWrap}>
+                      {uri ? (
+                        <Image source={{ uri }} style={styles.avatarImg} cachePolicy="none" />
+                      ) : (
+                        <View style={styles.avatarFallback}>
+                          <Text style={styles.avatarText}>{initials}</Text>
+                        </View>
+                      )}
+                    </View>
+                  ) : (
+                    <View style={styles.avatarSpacer} />
+                  )
+                ) : (
+                  <View style={styles.avatarSpacer} />
                 )}
 
-                <View style={[styles.row, mine ? styles.rowMine : styles.rowOther]}>
-                  {!mine ? (
-                    showMeta ? (
-                      <View style={styles.avatarWrap}>
-                        {uri ? (
-                          <Image
-                            source={{ uri }}
-                            style={styles.avatarImg}
-                            cachePolicy="none"
-                          />
-                        ) : (
-                          <View style={styles.avatarFallback}>
-                            <Text style={styles.avatarText}>{initials}</Text>
-                          </View>
-                        )}
-                      </View>
-                    ) : (
-                      <View style={styles.avatarSpacer} />
-                    )
-                  ) : (
-                    <View style={styles.avatarSpacer} />
-                  )}
-
-                  <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleOther]}>
-                    {!mine && showMeta && (
-                      <Text style={styles.bubbleName}>{item.displayName}</Text>
-                    )}
-
-                    <Text style={styles.bubbleText}>{item.text}</Text>
-
-                    {showMeta && !!timeLabel && <Text style={styles.timeText}>{timeLabel}</Text>}
-                  </View>
-
-                  {mine ? (
-                    showMeta ? (
-                      <View style={styles.avatarWrap}>
-                        {uri ? (
-                          <Image
-                            source={{ uri }}
-                            style={styles.avatarImg}
-                            cachePolicy="none"
-                          />
-                        ) : (
-                          <View style={styles.avatarFallback}>
-                            <Text style={styles.avatarText}>{initials}</Text>
-                          </View>
-                        )}
-                      </View>
-                    ) : (
-                      <View style={styles.avatarSpacer} />
-                    )
-                  ) : (
-                    <View style={styles.avatarSpacer} />
-                  )}
+                <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleOther]}>
+                  {!mine && showMeta && <Text style={styles.bubbleName}>{item.displayName}</Text>}
+                  <Text style={styles.bubbleText}>{item.text}</Text>
+                  {showMeta && !!timeLabel && <Text style={styles.timeText}>{timeLabel}</Text>}
                 </View>
-              </View>
-            );
-          }}
-        />
 
-        <View style={styles.composer}>
+                {/* Right avatar for mine (only on meta bubble) */}
+                {mine ? (
+                  showMeta ? (
+                    <View style={styles.avatarWrap}>
+                      {uri ? (
+                        <Image source={{ uri }} style={styles.avatarImg} cachePolicy="none" />
+                      ) : (
+                        <View style={styles.avatarFallback}>
+                          <Text style={styles.avatarText}>{initials}</Text>
+                        </View>
+                      )}
+                    </View>
+                  ) : (
+                    <View style={styles.avatarSpacer} />
+                  )
+                ) : (
+                  <View style={styles.avatarSpacer} />
+                )}
+              </View>
+            </View>
+          );
+        }}
+      />
+
+      {/* Composer */}
+      <View style={styles.composer}>
+        <View style={styles.inputRow}>
           <TextInput
             style={styles.input}
             value={text}
             onChangeText={setText}
             placeholder="Message…"
+            placeholderTextColor="rgba(255,255,255,0.40)"
             maxLength={500}
             multiline
           />
-
-          <TouchableOpacity
-            style={[styles.sendButton, !canSend && styles.sendButtonDisabled]}
-            onPress={handleSend}
-            disabled={!canSend}
-            activeOpacity={0.85}
-          >
-            <Text style={styles.sendButtonText}>{sending ? "…" : "Send"}</Text>
-          </TouchableOpacity>
         </View>
-      </KeyboardAvoidingView>
-    </SafeAreaView>
+
+        <Pressable
+          onPress={handleSend}
+          disabled={!canSend}
+          style={({ pressed }) => [
+            styles.sendBtn,
+            !canSend && styles.sendBtnDisabled,
+            pressed && canSend && styles.pressed,
+          ]}
+        >
+          <Text style={styles.sendBtnText}>{sending ? "…" : "Send"}</Text>
+        </Pressable>
+      </View>
+    </KeyboardAvoidingView>
   );
 }
 
 const AVATAR = 32;
 
 const styles = StyleSheet.create({
-  safe: { flex: 1 },
-  container: { flex: 1, padding: 16 },
+  safe: { flex: 1, backgroundColor: "#052b22" },
 
+  // Background layers (match Create vibe)
+  bg: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "#052b22",
+  },
+  pitchLines: {
+    ...StyleSheet.absoluteFillObject,
+    opacity: 0.26,
+    backgroundColor: "transparent",
+  },
+
+  pressed: { transform: [{ scale: 0.99 }] },
+
+  // Header
   header: {
+    paddingHorizontal: 14,
+    paddingTop: 6,
+    paddingBottom: 10,
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 16,
-    paddingTop: 8,
-    paddingBottom: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "#ddd",
+    gap: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.10)",
+    backgroundColor: "#052b22",
   },
-  backText: { fontSize: 16, color: "#007AFF", fontWeight: "600", width: 60 },
-  headerTitle: { fontSize: 18, fontWeight: "700" },
 
-  muteText: { fontSize: 14, fontWeight: "800", color: "#007AFF", width: 60, textAlign: "right" },
-  muteTextOn: { color: "#d11" },
+  headerBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    backgroundColor: "rgba(255,255,255,0.07)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+    minWidth: 72,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  headerBtnText: { color: "rgba(255,255,255,0.88)", fontWeight: "900" },
 
-  messagesContainer: { padding: 16, paddingBottom: 8 },
-  emptyText: { color: "#666" },
+  headerTitle: { color: "white", fontWeight: "900", fontSize: 16, letterSpacing: 0.2 },
+  headerSub: {
+    marginTop: 2,
+    color: "rgba(255,255,255,0.60)",
+    fontWeight: "800",
+    fontSize: 12,
+  },
 
+  mutePill: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.07)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+    minWidth: 80,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  mutePillOn: {
+    backgroundColor: "rgba(255, 80, 80, 0.12)",
+    borderColor: "rgba(255, 80, 80, 0.22)",
+  },
+  mutePillText: { color: "rgba(255,255,255,0.88)", fontWeight: "900", fontSize: 13 },
+  mutePillTextOn: { color: "rgba(255, 190, 190, 0.95)" },
+
+  // Centered state cards
+  centerWrap: { flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 18 },
+  stateCard: {
+    width: "100%",
+    borderRadius: 22,
+    padding: 18,
+    backgroundColor: "rgba(10, 16, 25, 0.78)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+    alignItems: "center",
+  },
+  stateTitle: { color: "white", fontWeight: "900", fontSize: 18 },
+  stateSubtle: {
+    marginTop: 8,
+    color: "rgba(255,255,255,0.65)",
+    fontWeight: "800",
+    textAlign: "center",
+  },
+
+  secondaryBtn: {
+    marginTop: 14,
+    height: 52,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 16,
+    backgroundColor: "rgba(255,255,255,0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+  },
+  secondaryBtnText: { color: "rgba(255,255,255,0.88)", fontSize: 16, fontWeight: "900" },
+
+  // List
+  messagesContainer: { paddingHorizontal: 14, paddingTop: 14, paddingBottom: 10 },
+
+  emptyWrap: {
+    marginTop: 24,
+    alignItems: "center",
+    padding: 18,
+    borderRadius: 18,
+    backgroundColor: "rgba(10, 16, 25, 0.55)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+  },
+  emptyTitle: { color: "white", fontWeight: "900", fontSize: 16 },
+  emptySub: {
+    marginTop: 6,
+    color: "rgba(255,255,255,0.65)",
+    fontWeight: "800",
+    textAlign: "center",
+  },
+
+  // Chat row / bubbles
   row: { flexDirection: "row", alignItems: "flex-end" },
   rowMine: { justifyContent: "flex-end" },
   rowOther: { justifyContent: "flex-start" },
@@ -767,71 +901,103 @@ const styles = StyleSheet.create({
     borderRadius: AVATAR / 2,
     overflow: "hidden",
     marginHorizontal: 8,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.14)",
+    backgroundColor: "rgba(255,255,255,0.06)",
   },
   avatarImg: { width: AVATAR, height: AVATAR, borderRadius: AVATAR / 2 },
   avatarFallback: {
     width: AVATAR,
     height: AVATAR,
     borderRadius: AVATAR / 2,
-    backgroundColor: "#eef3ff",
     alignItems: "center",
     justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.10)",
   },
-  avatarText: { fontSize: 12, fontWeight: "800", color: "#2b4cff" },
+  avatarText: { fontSize: 12, fontWeight: "900", color: "rgba(255,255,255,0.9)" },
   avatarSpacer: { width: AVATAR, height: AVATAR, marginHorizontal: 8, opacity: 0 },
 
-  bubble: { maxWidth: "70%", paddingVertical: 8, paddingHorizontal: 10, borderRadius: 12 },
-  bubbleMine: { backgroundColor: "#D7EBFF" },
-  bubbleOther: { backgroundColor: "#F2F2F2" },
-  bubbleName: { fontSize: 12, fontWeight: "700", marginBottom: 4, color: "#333" },
-  bubbleText: { color: "#111" },
-  timeText: { marginTop: 6, fontSize: 11, color: "#666", alignSelf: "flex-end" },
-
-  dateSepWrap: { alignItems: "center", marginBottom: 6, marginTop: 2 },
-  dateSepPill: {
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-    borderRadius: 999,
-    backgroundColor: "#eee",
-  },
-  dateSepText: { fontSize: 12, fontWeight: "700", color: "#666" },
-
-  composer: {
-    flexDirection: "row",
-    gap: 10,
-    padding: 12,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: "#ddd",
-    alignItems: "flex-end",
-  },
-  input: {
-    flex: 1,
-    minHeight: 40,
-    maxHeight: 120,
-    borderWidth: 1,
-    borderColor: "#ccc",
-    borderRadius: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-  },
-  sendButton: {
-    width: 80,
-    height: 40,
-    borderRadius: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#007AFF",
-  },
-  sendButtonDisabled: { backgroundColor: "#9cc7ff" },
-  sendButtonText: { color: "#fff", fontWeight: "800" },
-
-  backBtn: {
+  bubble: {
+    maxWidth: "72%",
     paddingVertical: 10,
     paddingHorizontal: 12,
-    borderRadius: 10,
-    backgroundColor: "#eee",
-    alignSelf: "flex-start",
-    marginTop: 12,
+    borderRadius: 16,
+    borderWidth: 1,
   },
-  backBtnText: { fontWeight: "700" },
+  bubbleMine: {
+    backgroundColor: "rgba(27, 127, 90, 0.55)",
+    borderColor: "rgba(27, 127, 90, 0.30)",
+  },
+  bubbleOther: {
+    backgroundColor: "rgba(255,255,255,0.08)",
+    borderColor: "rgba(255,255,255,0.12)",
+  },
+
+  bubbleName: {
+    fontSize: 12,
+    fontWeight: "900",
+    marginBottom: 6,
+    color: "rgba(255,255,255,0.78)",
+  },
+  bubbleText: { color: "white", fontSize: 15, fontWeight: "700", lineHeight: 20 },
+  timeText: {
+    marginTop: 8,
+    fontSize: 11,
+    color: "rgba(255,255,255,0.55)",
+    alignSelf: "flex-end",
+    fontWeight: "800",
+  },
+
+  // Date separator
+  dateSepWrap: { alignItems: "center", marginBottom: 8, marginTop: 2 },
+  dateSepPill: {
+    paddingVertical: 5,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    backgroundColor: "rgba(10, 16, 25, 0.65)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+  },
+  dateSepText: { fontSize: 12, fontWeight: "900", color: "rgba(255,255,255,0.65)" },
+
+  // Composer
+  composer: {
+    paddingHorizontal: 14,
+    paddingTop: 10,
+    paddingBottom: 12,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.10)",
+    backgroundColor: "#052b22",
+    flexDirection: "row",
+    gap: 10,
+    alignItems: "flex-end",
+  },
+
+  inputRow: {
+    flex: 1,
+    borderRadius: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    minHeight: 48,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+  },
+  input: {
+    color: "white",
+    fontSize: 16,
+    fontWeight: "800",
+    maxHeight: 120,
+  },
+
+  sendBtn: {
+    width: 84,
+    height: 48,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#1b7f5a",
+  },
+  sendBtnDisabled: { opacity: 0.55 },
+  sendBtnText: { color: "#04130f", fontWeight: "900", fontSize: 16 },
 });
