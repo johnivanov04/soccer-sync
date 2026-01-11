@@ -1,6 +1,13 @@
 // app/(app)/(tabs)/myRsvps.tsx
 import { useRouter } from "expo-router";
-import { collection, doc, query, where, type DocumentData, type QueryDocumentSnapshot } from "firebase/firestore";
+import {
+  collection,
+  doc,
+  query,
+  where,
+  type DocumentData,
+  type QueryDocumentSnapshot,
+} from "firebase/firestore";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -10,6 +17,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../../../src/context/AuthContext";
 import { db } from "../../../src/firebaseConfig";
 import { onSnapshotSafe } from "../../../src/firestoreSafe";
@@ -54,35 +62,124 @@ function normalizeStatus(s?: string) {
   return (s ?? "scheduled").toLowerCase();
 }
 
-function getMatchChip(match: Match | null) {
+function isArchivedStatus(status?: string) {
+  const st = normalizeStatus(status);
+  return st === "played" || st === "cancelled" || st === "canceled";
+}
+
+function formatCountdown(ms: number) {
+  const abs = Math.abs(ms);
+  const sec = Math.floor(abs / 1000);
+  const min = Math.floor(sec / 60);
+  const hr = Math.floor(min / 60);
+  const day = Math.floor(hr / 24);
+
+  const remHr = hr % 24;
+  const remMin = min % 60;
+
+  const parts: string[] = [];
+  if (day > 0) parts.push(`${day}d`);
+  if (remHr > 0) parts.push(`${remHr}h`);
+  if (day === 0 && remMin > 0) parts.push(`${remMin}m`);
+  if (parts.length === 0) parts.push("0m");
+
+  return parts.join(" ");
+}
+
+// Match chip logic aligned with Matches screen (cancelled/played/closed/full/minPlayers/etc.)
+function getChip(match: Match | null) {
   if (!match) return { label: "Unavailable", variant: "unavailable" as const };
 
   const status = normalizeStatus(match.status);
-  if (status === "cancelled" || status === "canceled")
-    return { label: "Cancelled", variant: "cancelled" as const };
-  if (status === "played") return { label: "Played", variant: "played" as const };
 
-  if (match.rsvpDeadline) {
-    const deadline = toDate(match.rsvpDeadline);
-    if (Date.now() > deadline.getTime())
-      return { label: "RSVP closed", variant: "closed" as const };
+  if (status === "cancelled" || status === "canceled") {
+    return { label: "Cancelled", variant: "cancelled" as const };
+  }
+  if (status === "played") {
+    return { label: "Played", variant: "played" as const };
   }
 
   const confirmed = match.confirmedYesCount ?? 0;
-  const max = match.maxPlayers ?? 0;
-  if (max > 0 && confirmed >= max) return { label: "Full", variant: "full" as const };
+  const minPlayers = match.minPlayers ?? 0;
+  const maxPlayers = match.maxPlayers ?? 0;
+
+  if (match.rsvpDeadline) {
+    const deadline = toDate(match.rsvpDeadline);
+    if (Date.now() > deadline.getTime()) {
+      return { label: "RSVP closed", variant: "closed" as const };
+    }
+  }
+
+  if (maxPlayers > 0 && confirmed >= maxPlayers) {
+    return { label: "Full", variant: "full" as const };
+  }
+
+  if (minPlayers > 0) {
+    const needed = Math.max(0, minPlayers - confirmed);
+    if (needed === 0) return { label: "On track", variant: "ontrack" as const };
+    return { label: `Needs ${needed}`, variant: "needs" as const };
+  }
+
+  const start = match.startDateTime ? toDate(match.startDateTime) : new Date();
+  const hoursToStart = (start.getTime() - Date.now()) / (1000 * 60 * 60);
+  if (hoursToStart <= 24) return { label: "At risk", variant: "atrisk" as const };
 
   return { label: "Scheduled", variant: "scheduled" as const };
 }
 
-function getMyChip(r: MyRsvp) {
+// My RSVP badge aligned with Matches screen styling
+function getMyRsvpBadge(r: MyRsvp) {
+  if (!r.status) return null;
+
   if (r.status === "yes") {
     return r.isWaitlisted
-      ? { label: "Waitlist", variant: "waitlist" as const }
-      : { label: "Confirmed", variant: "confirmed" as const };
+      ? { label: "⏳ Waitlisted", variant: "waitlisted" as const }
+      : { label: "✅ Confirmed", variant: "confirmed" as const };
   }
-  if (r.status === "maybe") return { label: "Maybe", variant: "maybe" as const };
-  return { label: "No", variant: "no" as const };
+  if (r.status === "maybe") return { label: "🟦 Maybe", variant: "maybe" as const };
+  return { label: "⬜ No", variant: "no" as const };
+}
+
+function PrimaryButton({
+  title,
+  onPress,
+  disabled,
+}: {
+  title: string;
+  onPress: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <TouchableOpacity
+      onPress={onPress}
+      disabled={!!disabled}
+      activeOpacity={0.92}
+      style={[styles.primaryBtn, disabled && styles.primaryBtnDisabled]}
+    >
+      <Text style={styles.primaryBtnText}>{title}</Text>
+    </TouchableOpacity>
+  );
+}
+
+function SecondaryButton({
+  title,
+  onPress,
+  disabled,
+}: {
+  title: string;
+  onPress: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <TouchableOpacity
+      onPress={onPress}
+      disabled={!!disabled}
+      activeOpacity={0.92}
+      style={[styles.secondaryBtn, disabled && styles.primaryBtnDisabled]}
+    >
+      <Text style={styles.secondaryBtnText}>{title}</Text>
+    </TouchableOpacity>
+  );
 }
 
 export default function MyRsvpsScreen() {
@@ -161,7 +258,6 @@ export default function MyRsvpsScreen() {
   const matchUnsubsRef = useRef<Record<string, () => void>>({});
 
   useEffect(() => {
-    // stop any previous listeners
     Object.values(matchUnsubsRef.current).forEach((u) => u());
     matchUnsubsRef.current = {};
 
@@ -170,7 +266,6 @@ export default function MyRsvpsScreen() {
       return;
     }
 
-    // prune cache to only current ids
     setMatchesById((prev) => {
       const keep = new Set(matchIds);
       const next: Record<string, Match | null> = {};
@@ -180,7 +275,6 @@ export default function MyRsvpsScreen() {
       return next;
     });
 
-    // start listeners
     matchIds.forEach((id) => {
       const matchRef = doc(db, "matches", id);
 
@@ -190,7 +284,7 @@ export default function MyRsvpsScreen() {
           setMatchesById((prev) => {
             const next = { ...prev };
             if (snap.exists()) next[id] = { id: snap.id, ...(snap.data() as any) };
-            else next[id] = null; // deleted / missing
+            else next[id] = null;
             return next;
           });
         },
@@ -200,7 +294,6 @@ export default function MyRsvpsScreen() {
             setMatchesById((prev) => ({ ...prev, [id]: null }));
           },
           onError: (err) => {
-            // don't kill whole screen
             console.error("My RSVPs match doc listener error", id, err);
             setMatchesById((prev) => ({ ...prev, [id]: null }));
           },
@@ -222,7 +315,10 @@ export default function MyRsvpsScreen() {
     const merged = rsvps.map((r) => {
       const match = matchesById[r.matchId] ?? null;
 
-      const startMs = match?.startDateTime ? toDate(match.startDateTime).getTime() : Number.POSITIVE_INFINITY;
+      const startMs = match?.startDateTime
+        ? toDate(match.startDateTime).getTime()
+        : Number.POSITIVE_INFINITY;
+
       const matchStatus = normalizeStatus(match?.status);
 
       const isUnavailable = !match;
@@ -255,156 +351,331 @@ export default function MyRsvpsScreen() {
     ].filter((s) => s.data.length > 0);
   }, [rsvps, matchesById]);
 
+  const header = () => {
+    return (
+      <View style={{ paddingTop: 6, paddingBottom: 10 }}>
+        <Text style={styles.heroTitle}>My RSVPs</Text>
+        <Text style={styles.heroSub}>
+          Track what you said yes to, what you’re on the fence about, and what you skipped.
+        </Text>
+
+        <Text style={styles.sectionTitle}>Your list</Text>
+      </View>
+    );
+  };
+
+  const EmptyNotice = ({
+    title,
+    sub,
+    buttonTitle,
+    onPress,
+    secondary,
+  }: {
+    title: string;
+    sub: string;
+    buttonTitle?: string;
+    onPress?: () => void;
+    secondary?: boolean;
+  }) => {
+    return (
+      <View style={{ marginTop: 6 }}>
+        <View style={styles.glassNotice}>
+          <Text style={styles.noticeTitle}>{title}</Text>
+          <Text style={styles.noticeSub}>{sub}</Text>
+
+          {!!buttonTitle && !!onPress && (
+            <View style={{ marginTop: 12 }}>
+              {secondary ? (
+                <SecondaryButton title={buttonTitle} onPress={onPress} />
+              ) : (
+                <PrimaryButton title={buttonTitle} onPress={onPress} />
+              )}
+            </View>
+          )}
+        </View>
+      </View>
+    );
+  };
+
+  // ---- States ----
   if (!user?.uid) {
     return (
-      <View style={styles.container}>
-        <Text style={styles.title}>My RSVPs</Text>
-        <Text style={{ marginTop: 8 }}>Please sign in to view your RSVPs.</Text>
-      </View>
+      <SafeAreaView style={styles.safe} edges={["left", "right", "bottom"]}>
+        <View style={styles.screen}>
+          <View style={styles.bg} />
+          <View style={styles.pitchBlobs} />
+
+          <View style={[styles.centerWrap, { paddingHorizontal: 18 }]}>
+            <Text style={styles.heroTitle}>My RSVPs</Text>
+            <Text style={styles.heroSub}>Sign in to view your RSVPs.</Text>
+
+            <EmptyNotice
+              title="You’re signed out."
+              sub="Sign in, then come back here to see your RSVP history."
+            />
+          </View>
+        </View>
+      </SafeAreaView>
     );
   }
 
   if (loading) {
     return (
-      <View style={styles.container}>
-        <Text style={styles.title}>My RSVPs</Text>
-        <View style={{ marginTop: 16 }}>
-          <ActivityIndicator />
+      <SafeAreaView style={styles.safe} edges={["left", "right", "bottom"]}>
+        <View style={styles.screen}>
+          <View style={styles.bg} />
+          <View style={styles.pitchBlobs} />
+          <View style={styles.centerWrap}>
+            <View style={styles.glassNotice}>
+              <Text style={styles.noticeTitle}>Loading…</Text>
+              <Text style={styles.noticeSub}>Pulling your RSVPs.</Text>
+              <View style={{ marginTop: 14 }}>
+                <ActivityIndicator />
+              </View>
+            </View>
+          </View>
         </View>
-      </View>
+      </SafeAreaView>
     );
   }
 
   if (errorText) {
     return (
-      <View style={styles.container}>
-        <Text style={styles.title}>My RSVPs</Text>
-        <Text style={{ marginTop: 12, color: "#a00" }}>{errorText}</Text>
-      </View>
+      <SafeAreaView style={styles.safe} edges={["left", "right", "bottom"]}>
+        <View style={styles.screen}>
+          <View style={styles.bg} />
+          <View style={styles.pitchBlobs} />
+          <View style={[styles.centerWrap, { paddingHorizontal: 18 }]}>
+            <Text style={styles.heroTitle}>My RSVPs</Text>
+            <Text style={styles.heroSub}>Something went wrong.</Text>
+
+            <EmptyNotice title="Couldn’t load RSVPs." sub={errorText} />
+          </View>
+        </View>
+      </SafeAreaView>
     );
   }
 
   if (!rsvps.length) {
     return (
-      <View style={styles.container}>
-        <Text style={styles.title}>My RSVPs</Text>
-        <Text style={{ marginTop: 12, color: "#555" }}>
-          No RSVPs yet. Go to Matches and tap YES/MAYBE/NO on a match.
-        </Text>
-      </View>
+      <SafeAreaView style={styles.safe} edges={["left", "right", "bottom"]}>
+        <View style={styles.screen}>
+          <View style={styles.bg} />
+          <View style={styles.pitchBlobs} />
+
+          <View style={[styles.centerWrap, { paddingHorizontal: 18 }]}>
+            <Text style={styles.heroTitle}>My RSVPs</Text>
+            <Text style={styles.heroSub}>No activity yet — it’ll show up here.</Text>
+
+            <EmptyNotice
+              title="No RSVPs yet."
+              sub="Go to Matches and tap YES / MAYBE / NO on a match."
+              buttonTitle="Go to Matches"
+              onPress={() => router.push("/(app)/(tabs)/matches")}
+              secondary
+            />
+          </View>
+        </View>
+      </SafeAreaView>
     );
   }
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>My RSVPs</Text>
+    <SafeAreaView style={styles.safe} edges={["left", "right", "bottom"]}>
+      <View style={styles.screen}>
+        {/* Background layers */}
+        <View style={styles.bg} />
+        <View style={styles.pitchBlobs} />
 
-      <SectionList
-        sections={sections}
-        keyExtractor={(item) => item.rsvp.id}
-        contentContainerStyle={{ paddingVertical: 12 }}
-        renderSectionHeader={({ section }) => (
-          <Text style={styles.sectionHeader}>{section.title}</Text>
-        )}
-        renderItem={({ item }) => {
-          const { rsvp, match } = item;
-          const myChip = getMyChip(rsvp);
-          const matchChip = getMatchChip(match);
+        <SectionList
+          sections={sections}
+          keyExtractor={(item) => item.rsvp.id}
+          ListHeaderComponent={header}
+          stickySectionHeadersEnabled={false}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.listContent}
+          renderSectionHeader={({ section }) => (
+            <Text style={styles.sectionTitle}>{section.title}</Text>
+          )}
+          renderItem={({ item }) => {
+            const { rsvp, match } = item;
 
-          const date = match?.startDateTime ? toDate(match.startDateTime) : null;
-          const confirmed = match?.confirmedYesCount ?? 0;
-          const max = match?.maxPlayers ?? 0;
-          const waitlist = match?.waitlistCount ?? 0;
+            const date = match?.startDateTime ? toDate(match.startDateTime) : null;
+            const chip = getChip(match);
+            const myBadge = getMyRsvpBadge(rsvp);
 
-          const isHost = !!match?.createdBy && match.createdBy === user.uid;
-          const canOpen = !!match;
+            const confirmed = match?.confirmedYesCount ?? 0;
+            const max = match?.maxPlayers ?? 0;
+            const waitlist = match?.waitlistCount ?? 0;
 
-          return (
-            <TouchableOpacity
-              style={[styles.card, !canOpen && { opacity: 0.6 }]}
-              disabled={!canOpen}
-              onPress={() =>
-                router.push({
-                  pathname: "/(app)/match/[matchId]",
-                  params: { matchId: rsvp.matchId },
-                })
-              }
-            >
-              <View style={styles.cardTopRow}>
-                <Text style={styles.cardTitle} numberOfLines={1}>
-                  {date
-                    ? `${date.toLocaleDateString()} ${date.toLocaleTimeString([], {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}`
-                    : "Match unavailable"}
-                </Text>
+            const isHost = !!match?.createdBy && match.createdBy === user.uid;
+            const desc = (match?.description ?? "").trim();
 
-                <View style={[styles.chip, (styles as any)[`chip_${matchChip.variant}`]]}>
-                  <Text style={styles.chipText}>{matchChip.label}</Text>
-                </View>
-              </View>
+            const startHint = (() => {
+              if (!match || !date) return null;
+              if (isArchivedStatus(match.status)) return null;
 
-              {!!match?.locationText && (
-                <Text style={styles.location} numberOfLines={2}>
-                  {match.locationText}
-                </Text>
-              )}
+              const msUntilStart = date.getTime() - Date.now();
+              return msUntilStart >= 0
+                ? `Starts in ${formatCountdown(msUntilStart)}`
+                : "In progress / started";
+            })();
 
-              {!!match?.description?.trim() && (
-                <Text style={styles.description} numberOfLines={2}>
-                  {match.description.trim()}
-                </Text>
-              )}
+            const canOpen = !!match;
 
-              <View style={styles.metaRow}>
-                <View style={[styles.chip, (styles as any)[`chip_${myChip.variant}`]]}>
-                  <Text style={styles.chipText}>
-                    {myChip.label}
-                    {myChip.variant === "confirmed" ? " ✅" : ""}
+            return (
+              <TouchableOpacity
+                style={[styles.card, !canOpen && { opacity: 0.6 }]}
+                disabled={!canOpen}
+                activeOpacity={0.92}
+                onPress={() =>
+                  router.push({
+                    pathname: "/(app)/match/[matchId]",
+                    params: { matchId: rsvp.matchId },
+                  })
+                }
+              >
+                <View style={styles.cardTopRow}>
+                  <Text style={styles.cardTitle}>
+                    {date
+                      ? `${date.toLocaleDateString()} ${date.toLocaleTimeString([], {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}`
+                      : "Match unavailable"}
                   </Text>
+
+                  <View style={styles.topRight}>
+                    <View style={[styles.chip, (styles as any)[`chip_${chip.variant}`]]}>
+                      <Text style={styles.chipText}>{chip.label}</Text>
+                    </View>
+                  </View>
                 </View>
 
-                {!!match && (
-                  <>
-                    <Text style={styles.subtitle}>
+                {!!startHint && <Text style={styles.startHint}>{startHint}</Text>}
+
+                {!!match?.locationText && (
+                  <Text style={styles.location} numberOfLines={2}>
+                    {match.locationText}
+                  </Text>
+                )}
+
+                {!!desc && (
+                  <Text style={styles.desc} numberOfLines={2}>
+                    {desc}
+                  </Text>
+                )}
+
+                <View style={styles.metaRow}>
+                  {!!match && (
+                    <Text style={styles.metaText}>
                       {confirmed}/{max || "?"} going
                     </Text>
+                  )}
 
-                    {waitlist > 0 && (
-                      <Text style={styles.waitlistText}>⏳ {waitlist} waitlist</Text>
-                    )}
+                  {waitlist > 0 && <Text style={styles.waitlistText}>⏳ {waitlist} waitlist</Text>}
 
-                    {isHost && <Text style={styles.hostBadge}>👑 Host</Text>}
-                  </>
-                )}
-              </View>
-            </TouchableOpacity>
-          );
-        }}
-      />
-    </View>
+                  {!!myBadge && (
+                    <View style={[styles.myBadge, (styles as any)[`myBadge_${myBadge.variant}`]]}>
+                      <Text style={styles.myBadgeText}>{myBadge.label}</Text>
+                    </View>
+                  )}
+
+                  {isHost && <Text style={styles.hostBadge}>👑 Host</Text>}
+                </View>
+              </TouchableOpacity>
+            );
+          }}
+        />
+      </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 16 },
-  title: { fontSize: 18, fontWeight: "700" },
+  // Safe area
+  safe: { flex: 1, backgroundColor: "#052b22" },
 
-  sectionHeader: {
-    marginTop: 14,
-    marginBottom: 8,
-    fontSize: 14,
-    fontWeight: "700",
-    color: "#333",
+  // Screen
+  screen: { flex: 1, backgroundColor: "#052b22" },
+
+  // Background
+  bg: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "#052b22",
   },
 
-  card: {
-    padding: 12,
-    marginBottom: 10,
-    borderRadius: 10,
-    borderColor: "#ddd",
+  // soft “pitch blobs”
+  pitchBlobs: {
+    ...StyleSheet.absoluteFillObject,
+    opacity: 0.35,
+    backgroundColor: "transparent",
+  },
+
+  listContent: {
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 24,
+  },
+
+  // Hero
+  heroTitle: {
+    fontSize: 44,
+    fontWeight: "900",
+    color: "white",
+    letterSpacing: 0.2,
+  },
+  heroSub: {
+    marginTop: 6,
+    fontSize: 16,
+    fontWeight: "700",
+    color: "rgba(255,255,255,0.70)",
+    lineHeight: 20,
+  },
+  sectionTitle: {
+    marginTop: 18,
+    fontSize: 18,
+    fontWeight: "900",
+    color: "rgba(255,255,255,0.92)",
+  },
+
+  // Buttons (same as Matches)
+  primaryBtn: {
+    height: 54,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#1b7f5a",
+  },
+  primaryBtnDisabled: { opacity: 0.55 },
+  primaryBtnText: {
+    color: "#04130f",
+    fontSize: 18,
+    fontWeight: "900",
+  },
+  secondaryBtn: {
+    height: 54,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.10)",
     borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+  },
+  secondaryBtnText: {
+    color: "rgba(255,255,255,0.92)",
+    fontSize: 17,
+    fontWeight: "900",
+  },
+
+  // Cards (same as Matches)
+  card: {
+    marginTop: 12,
+    padding: 14,
+    borderRadius: 18,
+    backgroundColor: "rgba(10, 16, 25, 0.78)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
   },
 
   cardTopRow: {
@@ -413,47 +684,98 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 10,
   },
+  cardTitle: {
+    flex: 1,
+    fontWeight: "900",
+    color: "white",
+    fontSize: 15,
+  },
 
-  cardTitle: { fontWeight: "bold", flex: 1 },
-  location: { marginTop: 6, color: "#555" },
-  description: { marginTop: 4, color: "#666" },
+  topRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
 
+  startHint: { marginTop: 8, color: "rgba(255,255,255,0.65)", fontWeight: "700" },
+  location: { marginTop: 6, color: "rgba(255,255,255,0.78)", fontWeight: "700" },
+  desc: { marginTop: 6, color: "rgba(255,255,255,0.72)", lineHeight: 18, fontWeight: "600" },
+
+  // Meta row (same as Matches)
   metaRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    marginTop: 10,
+    marginTop: 12,
     flexWrap: "wrap",
   },
-
-  subtitle: { color: "#777" },
-  waitlistText: { color: "#7a4d00" },
+  metaText: { color: "rgba(255,255,255,0.65)", fontWeight: "800" },
+  waitlistText: { color: "rgba(255,231,184,0.95)", fontWeight: "900" },
 
   hostBadge: {
-    backgroundColor: "#FFF3CD",
-    paddingVertical: 3,
-    paddingHorizontal: 8,
+    backgroundColor: "rgba(255, 243, 205, 0.22)",
+    paddingVertical: 4,
+    paddingHorizontal: 10,
     borderRadius: 999,
     fontSize: 12,
-    fontWeight: "600",
+    fontWeight: "900",
+    color: "rgba(255,255,255,0.92)",
+    overflow: "hidden",
   },
 
+  // Chips (same as Matches + unavailable)
   chip: {
     paddingVertical: 4,
     paddingHorizontal: 10,
     borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
   },
-  chipText: { fontSize: 12, fontWeight: "700" },
+  chipText: { fontSize: 12, fontWeight: "900", color: "rgba(255,255,255,0.92)" },
 
-  chip_confirmed: { backgroundColor: "#DFF7E3" },
-  chip_waitlist: { backgroundColor: "#FFE7B8" },
-  chip_maybe: { backgroundColor: "#E9E3FF" },
-  chip_no: { backgroundColor: "#F2F2F2" },
+  chip_ontrack: { backgroundColor: "rgba(27, 127, 90, 0.25)" },
+  chip_needs: { backgroundColor: "rgba(255,255,255,0.10)" },
+  chip_atrisk: { backgroundColor: "rgba(255, 120, 120, 0.18)" },
+  chip_cancelled: { backgroundColor: "rgba(255,255,255,0.08)" },
+  chip_played: { backgroundColor: "rgba(120, 180, 255, 0.20)" },
+  chip_full: { backgroundColor: "rgba(255, 231, 184, 0.20)" },
+  chip_closed: { backgroundColor: "rgba(180, 150, 255, 0.20)" },
+  chip_scheduled: { backgroundColor: "rgba(255,255,255,0.10)" },
+  chip_unavailable: { backgroundColor: "rgba(255,255,255,0.08)" },
 
-  chip_played: { backgroundColor: "#E6F4FF" },
-  chip_cancelled: { backgroundColor: "#F2F2F2" },
-  chip_closed: { backgroundColor: "#E9E3FF" },
-  chip_full: { backgroundColor: "#FFE7B8" },
-  chip_scheduled: { backgroundColor: "#EDEDED" },
-  chip_unavailable: { backgroundColor: "#F2F2F2" },
+  // My RSVP badge (same as Matches)
+  myBadge: {
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+  },
+  myBadgeText: { fontSize: 12, fontWeight: "900", color: "rgba(255,255,255,0.92)" },
+  myBadge_confirmed: { backgroundColor: "rgba(27, 127, 90, 0.25)" },
+  myBadge_waitlisted: { backgroundColor: "rgba(255, 231, 184, 0.20)" },
+  myBadge_maybe: { backgroundColor: "rgba(120, 180, 255, 0.20)" },
+  myBadge_no: { backgroundColor: "rgba(255,255,255,0.08)" },
+
+  // Empty / notices (same as Matches)
+  centerWrap: { flex: 1, justifyContent: "center", alignItems: "center" },
+  glassNotice: {
+    width: "100%",
+    borderRadius: 22,
+    padding: 18,
+    backgroundColor: "rgba(10, 16, 25, 0.78)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+  },
+  noticeTitle: {
+    fontSize: 18,
+    fontWeight: "900",
+    color: "rgba(255,255,255,0.92)",
+  },
+  noticeSub: {
+    marginTop: 6,
+    color: "rgba(255,255,255,0.70)",
+    fontWeight: "700",
+    lineHeight: 18,
+  },
 });
