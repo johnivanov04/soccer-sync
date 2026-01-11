@@ -30,6 +30,8 @@ import {
   Text,
   TextInput,
   View,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../../../../src/context/AuthContext";
@@ -249,6 +251,61 @@ export default function MatchChatScreen() {
     return () => sub.remove();
   }, [scheduleMarkChatRead]);
 
+  // -------------------------------
+  // ✅ Scroll-to-bottom + unseen count
+  // -------------------------------
+  const [atBottom, setAtBottom] = useState(true);
+  const [unseenCount, setUnseenCount] = useState(0);
+  const contentHRef = useRef(0);
+  const layoutHRef = useRef(0);
+  const yRef = useRef(0);
+  const prevMsgCountRef = useRef(0);
+
+  const updateAtBottom = useCallback(() => {
+    const contentH = contentHRef.current;
+    const layoutH = layoutHRef.current;
+    const y = yRef.current;
+
+    if (!contentH || !layoutH) return;
+
+    const dist = contentH - (y + layoutH);
+    const isBottom = dist <= 90; // threshold
+    setAtBottom(isBottom);
+    if (isBottom) setUnseenCount(0);
+  }, []);
+
+  const scrollToBottom = useCallback(
+    (animated = true) => {
+      requestAnimationFrame(() => {
+        listRef.current?.scrollToEnd({ animated });
+      });
+      setUnseenCount(0);
+      setAtBottom(true);
+      scheduleMarkChatRead();
+    },
+    [scheduleMarkChatRead]
+  );
+
+  // -------------------------------
+  // ✅ Local typing indicator (just polish)
+  // -------------------------------
+  const [inputFocused, setInputFocused] = useState(false);
+  const showTyping = inputFocused && text.trim().length > 0 && !sending;
+
+  const [typingDots, setTypingDots] = useState("");
+  useEffect(() => {
+    if (!showTyping) {
+      setTypingDots("");
+      return;
+    }
+    let i = 0;
+    const t = setInterval(() => {
+      i = (i + 1) % 4; // "", ".", "..", "..."
+      setTypingDots(".".repeat(i));
+    }, 420);
+    return () => clearInterval(t);
+  }, [showTyping]);
+
   // ✅ Subscribe to match doc to get teamId + lastMessageSeq
   useEffect(() => {
     if (!matchIdStr) {
@@ -457,8 +514,31 @@ export default function MatchChatScreen() {
     requestAnimationFrame(() => {
       listRef.current?.scrollToEnd({ animated: false });
       didInitialScroll.current = true;
+      setAtBottom(true);
+      setUnseenCount(0);
+      prevMsgCountRef.current = messages.length;
     });
   }, [messages.length]);
+
+  // If new messages arrive:
+  // - when at bottom => keep you pinned to bottom
+  // - when not at bottom => show "scroll to bottom" + count
+  useEffect(() => {
+    const prev = prevMsgCountRef.current;
+    const curr = messages.length;
+    prevMsgCountRef.current = curr;
+
+    if (!didInitialScroll.current) return;
+    if (curr <= prev) return;
+
+    const added = curr - prev;
+
+    if (atBottom) {
+      scrollToBottom(true);
+    } else {
+      setUnseenCount((c) => c + added);
+    }
+  }, [messages.length, atBottom, scrollToBottom]);
 
   const canSend = useMemo(() => {
     return (
@@ -512,10 +592,8 @@ export default function MatchChatScreen() {
       setText("");
 
       requestAnimationFrame(() => {
-        listRef.current?.scrollToEnd({ animated: true });
+        scrollToBottom(true);
       });
-
-      scheduleMarkChatRead();
     } catch (e) {
       console.error("Send message error:", e);
       Alert.alert("Error", "Could not send message.");
@@ -526,7 +604,7 @@ export default function MatchChatScreen() {
 
   const handleBack = () => router.back();
 
-  // ✅ FIX: Paint background at SafeArea level so top/bottom insets match
+  // ✅ Background now covers safe areas too (fixes top/bottom tint)
   const renderShell = (content: React.ReactNode) => {
     return (
       <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
@@ -584,6 +662,11 @@ export default function MatchChatScreen() {
     );
   }
 
+  const onScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    yRef.current = e.nativeEvent.contentOffset.y;
+    updateAtBottom();
+  };
+
   return renderShell(
     <KeyboardAvoidingView
       style={{ flex: 1 }}
@@ -633,6 +716,16 @@ export default function MatchChatScreen() {
         keyExtractor={(m) => m.id}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
+        scrollEventThrottle={16}
+        onScroll={onScroll}
+        onLayout={(e) => {
+          layoutHRef.current = e.nativeEvent.layout.height;
+          updateAtBottom();
+        }}
+        onContentSizeChange={(_, h) => {
+          contentHRef.current = h;
+          updateAtBottom();
+        }}
         ListEmptyComponent={
           <View style={styles.emptyWrap}>
             <Text style={styles.emptyTitle}>No messages yet</Text>
@@ -689,7 +782,6 @@ export default function MatchChatScreen() {
               )}
 
               <View style={[styles.row, mine ? styles.rowMine : styles.rowOther]}>
-                {/* Left avatar for others (only on meta bubble) */}
                 {!mine ? (
                   showMeta ? (
                     <View style={styles.avatarWrap}>
@@ -714,7 +806,6 @@ export default function MatchChatScreen() {
                   {showMeta && !!timeLabel && <Text style={styles.timeText}>{timeLabel}</Text>}
                 </View>
 
-                {/* Right avatar for mine (only on meta bubble) */}
                 {mine ? (
                   showMeta ? (
                     <View style={styles.avatarWrap}>
@@ -738,6 +829,32 @@ export default function MatchChatScreen() {
         }}
       />
 
+      {/* Scroll-to-bottom button (shows when you're not at bottom) */}
+      {!atBottom && messages.length > 0 && (
+        <View pointerEvents="box-none" style={styles.fabWrap}>
+          <Pressable
+            onPress={() => scrollToBottom(true)}
+            style={({ pressed }) => [styles.fab, pressed && styles.pressed]}
+            hitSlop={10}
+          >
+            <Text style={styles.fabArrow}>↓</Text>
+            <Text style={styles.fabText}>Bottom</Text>
+            {unseenCount > 0 && (
+              <View style={styles.fabBadge}>
+                <Text style={styles.fabBadgeText}>{unseenCount > 99 ? "99+" : String(unseenCount)}</Text>
+              </View>
+            )}
+          </Pressable>
+        </View>
+      )}
+
+      {/* Typing indicator (local-only) */}
+      {showTyping && (
+        <View style={styles.typingWrap} pointerEvents="none">
+          <Text style={styles.typingText}>Typing{typingDots}</Text>
+        </View>
+      )}
+
       {/* Composer */}
       <View style={styles.composer}>
         <View style={styles.inputRow}>
@@ -749,6 +866,8 @@ export default function MatchChatScreen() {
             placeholderTextColor="rgba(255,255,255,0.40)"
             maxLength={500}
             multiline
+            onFocus={() => setInputFocused(true)}
+            onBlur={() => setInputFocused(false)}
           />
         </View>
 
@@ -773,7 +892,7 @@ const AVATAR = 32;
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: "#052b22" },
 
-  // Background layers (match Create vibe)
+  // Background layers
   bg: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: "#052b22",
@@ -813,12 +932,7 @@ const styles = StyleSheet.create({
   headerBtnText: { color: "rgba(255,255,255,0.88)", fontWeight: "900" },
 
   headerTitle: { color: "white", fontWeight: "900", fontSize: 16, letterSpacing: 0.2 },
-  headerSub: {
-    marginTop: 2,
-    color: "rgba(255,255,255,0.60)",
-    fontWeight: "800",
-    fontSize: 12,
-  },
+  headerSub: { marginTop: 2, color: "rgba(255,255,255,0.60)", fontWeight: "800", fontSize: 12 },
 
   mutePill: {
     paddingVertical: 8,
@@ -850,12 +964,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   stateTitle: { color: "white", fontWeight: "900", fontSize: 18 },
-  stateSubtle: {
-    marginTop: 8,
-    color: "rgba(255,255,255,0.65)",
-    fontWeight: "800",
-    textAlign: "center",
-  },
+  stateSubtle: { marginTop: 8, color: "rgba(255,255,255,0.65)", fontWeight: "800", textAlign: "center" },
 
   secondaryBtn: {
     marginTop: 14,
@@ -883,12 +992,7 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.10)",
   },
   emptyTitle: { color: "white", fontWeight: "900", fontSize: 16 },
-  emptySub: {
-    marginTop: 6,
-    color: "rgba(255,255,255,0.65)",
-    fontWeight: "800",
-    textAlign: "center",
-  },
+  emptySub: { marginTop: 6, color: "rgba(255,255,255,0.65)", fontWeight: "800", textAlign: "center" },
 
   // Chat row / bubbles
   row: { flexDirection: "row", alignItems: "flex-end" },
@@ -933,20 +1037,9 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.12)",
   },
 
-  bubbleName: {
-    fontSize: 12,
-    fontWeight: "900",
-    marginBottom: 6,
-    color: "rgba(255,255,255,0.78)",
-  },
+  bubbleName: { fontSize: 12, fontWeight: "900", marginBottom: 6, color: "rgba(255,255,255,0.78)" },
   bubbleText: { color: "white", fontSize: 15, fontWeight: "700", lineHeight: 20 },
-  timeText: {
-    marginTop: 8,
-    fontSize: 11,
-    color: "rgba(255,255,255,0.55)",
-    alignSelf: "flex-end",
-    fontWeight: "800",
-  },
+  timeText: { marginTop: 8, fontSize: 11, color: "rgba(255,255,255,0.55)", alignSelf: "flex-end", fontWeight: "800" },
 
   // Date separator
   dateSepWrap: { alignItems: "center", marginBottom: 8, marginTop: 2 },
@@ -959,6 +1052,59 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.10)",
   },
   dateSepText: { fontSize: 12, fontWeight: "900", color: "rgba(255,255,255,0.65)" },
+
+  // Scroll-to-bottom FAB
+  fabWrap: {
+    position: "absolute",
+    right: 14,
+    bottom: 12 + 48 + 12, // composer height-ish + padding
+    zIndex: 20,
+  },
+  fab: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    backgroundColor: "rgba(10, 16, 25, 0.78)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+  },
+  fabArrow: { color: "rgba(255,255,255,0.92)", fontWeight: "900", fontSize: 14 },
+  fabText: { color: "rgba(255,255,255,0.92)", fontWeight: "900", fontSize: 13 },
+  fabBadge: {
+    marginLeft: 2,
+    minWidth: 22,
+    height: 22,
+    borderRadius: 11,
+    paddingHorizontal: 6,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(27, 127, 90, 0.95)",
+  },
+  fabBadgeText: { color: "#04130f", fontWeight: "900", fontSize: 12 },
+
+  // Typing indicator (local-only)
+  typingWrap: {
+    position: "absolute",
+    left: 14,
+    right: 14,
+    bottom: 12 + 48 + 12 + 8, // just above composer
+    alignItems: "flex-start",
+    zIndex: 10,
+  },
+  typingText: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.07)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+    color: "rgba(255,255,255,0.70)",
+    fontWeight: "900",
+    fontSize: 12,
+  },
 
   // Composer
   composer: {
