@@ -1,5 +1,6 @@
 // app/(app)/match/[matchId].tsx
 import { Image } from "expo-image";
+import * as ExpoLinking from "expo-linking";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import {
   collection,
@@ -23,6 +24,7 @@ import {
   Platform,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   View,
@@ -303,6 +305,7 @@ export default function MatchDetailScreen() {
   const [rsvps, setRsvps] = useState<Rsvp[]>([]);
   const [userStatus, setUserStatus] = useState<RsvpStatus | null>(null);
   const [loadingMatch, setLoadingMatch] = useState(true);
+  const [permissionDenied, setPermissionDenied] = useState(false);
 
   const [exportingCalendar, setExportingCalendar] = useState(false);
   const [savingRsvp, setSavingRsvp] = useState(false);
@@ -322,16 +325,22 @@ export default function MatchDetailScreen() {
   useEffect(() => {
     if (!matchIdStr) return;
 
+    setPermissionDenied(false);
+    setLoadingMatch(true);
+
     const matchRef = doc(db, "matches", matchIdStr);
     const unsubMatch = onSnapshot(
       matchRef,
       (snap) => {
+        setPermissionDenied(false);
         if (snap.exists()) setMatch({ id: snap.id, ...(snap.data() as any) });
         else setMatch(null);
         setLoadingMatch(false);
       },
-      (err) => {
+      (err: any) => {
         console.error("Error listening to match", err);
+        const code = String(err?.code ?? "");
+        if (code.includes("permission-denied")) setPermissionDenied(true);
         setMatch(null);
         setLoadingMatch(false);
       }
@@ -498,6 +507,33 @@ export default function MatchDetailScreen() {
       pathname: "/(app)/match/chat/[matchId]",
       params: { matchId: String(matchIdStr) },
     });
+  };
+
+  const handleShareMatch = async () => {
+    if (!matchIdStr) return;
+
+    const url = ExpoLinking.createURL(`/match/${String(matchIdStr)}`);
+
+    const when = match?.startDateTime
+      ? `${startAt.toLocaleDateString()} ${startAt.toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        })}`
+      : "Pickup Soccer";
+
+    const loc = match?.locationText?.trim() ? `\n📍 ${match.locationText.trim()}` : "";
+    const msg = `⚽ ${when}${loc}\n\nOpen this match in the app:\n${url}`;
+
+    try {
+      await Share.share(
+        Platform.OS === "ios"
+          ? { message: msg, url }
+          : { message: msg }
+      );
+    } catch (e) {
+      console.warn("share failed", e);
+      Alert.alert("Couldn’t share link");
+    }
   };
 
   const handleRsvp = async (status: RsvpStatus) => {
@@ -718,8 +754,29 @@ export default function MatchDetailScreen() {
   if (!match) {
     return renderScreen(
       <View style={styles.card}>
-        <Text style={styles.h1}>Match not found</Text>
-        <Text style={styles.subtleText}>This match may have been deleted.</Text>
+        <Text style={styles.h1}>{permissionDenied ? "No access" : "Match not found"}</Text>
+        <Text style={styles.subtleText}>
+          {permissionDenied
+            ? "You might not be in the team for this match yet. Join the team and then reopen this link."
+            : "This match may have been deleted."}
+        </Text>
+
+        {permissionDenied && (
+          <Pressable
+            onPress={() =>
+              router.push({
+                pathname: "/(app)/(tabs)/teams",
+                params: { pendingMatchId: String(matchIdStr) },
+              })
+            }
+            style={({ pressed }) => [
+              styles.secondaryBtn,
+              pressed && { transform: [{ scale: 0.99 }] },
+            ]}
+          >
+            <Text style={styles.secondaryBtnText}>Go to Teams</Text>
+          </Pressable>
+        )}
 
         <Pressable
           onPress={() => router.back()}
@@ -784,6 +841,13 @@ export default function MatchDetailScreen() {
       {/* Actions */}
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>Actions</Text>
+
+        <ActionRow
+          icon="🔗"
+          title="Share match link"
+          subtitle="Send a link that opens this match"
+          onPress={handleShareMatch}
+        />
 
         <ActionRow
           icon={exportingCalendar ? "⏳" : "📅"}
@@ -925,7 +989,6 @@ export default function MatchDetailScreen() {
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Host tools</Text>
 
-          {/* ✅ UPDATED: Complete match -> attendance + minutes */}
           <ActionRow
             icon={isPlayed ? "📝" : "✅"}
             title={isPlayed ? "Edit attendance + minutes" : "Complete match"}
@@ -977,32 +1040,13 @@ const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: "#052b22" },
   screen: { flex: 1, backgroundColor: "#052b22" },
 
-  // Background
-  bg: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "#052b22",
-  },
-  pitchLines: {
-    ...StyleSheet.absoluteFillObject,
-    opacity: 0.32,
-    backgroundColor: "transparent",
-  },
+  bg: { ...StyleSheet.absoluteFillObject, backgroundColor: "#052b22" },
+  pitchLines: { ...StyleSheet.absoluteFillObject, opacity: 0.32, backgroundColor: "transparent" },
 
-  scrollContent: {
-    paddingHorizontal: 18,
-    paddingTop: 12,
-    paddingBottom: 28,
-  },
+  scrollContent: { paddingHorizontal: 18, paddingTop: 12, paddingBottom: 28 },
 
-  header: {
-    marginBottom: 12,
-  },
-  h1: {
-    fontSize: 30,
-    fontWeight: "900",
-    color: "white",
-    letterSpacing: 0.2,
-  },
+  header: { marginBottom: 12 },
+  h1: { fontSize: 30, fontWeight: "900", color: "white", letterSpacing: 0.2 },
   subtleText: {
     marginTop: 6,
     fontSize: 14,
@@ -1023,60 +1067,22 @@ const styles = StyleSheet.create({
     color: "rgba(255,255,255,0.78)",
     marginBottom: 10,
   },
-  bodyText: {
-    color: "rgba(255,255,255,0.82)",
-    fontWeight: "800",
-    lineHeight: 19,
-  },
-  bodyMuted: {
-    color: "rgba(255,255,255,0.60)",
-    fontWeight: "800",
-  },
+  bodyText: { color: "rgba(255,255,255,0.82)", fontWeight: "800", lineHeight: 19 },
+  bodyMuted: { color: "rgba(255,255,255,0.60)", fontWeight: "800" },
 
-  metaLine: {
-    marginTop: 12,
-    color: "rgba(255,255,255,0.70)",
-    fontWeight: "900",
-  },
-  dangerText: {
-    marginTop: 8,
-    color: "#ff7a7a",
-    fontWeight: "900",
-  },
+  metaLine: { marginTop: 12, color: "rgba(255,255,255,0.70)", fontWeight: "900" },
+  dangerText: { marginTop: 8, color: "#ff7a7a", fontWeight: "900" },
 
-  chipRow: {
-    marginTop: 12,
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-  },
-  chip: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 999,
-    borderWidth: 1,
-  },
-  chipText: {
-    fontSize: 12,
-    fontWeight: "900",
-    color: "rgba(255,255,255,0.88)",
-  },
+  chipRow: { marginTop: 12, flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  chip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999, borderWidth: 1 },
+  chipText: { fontSize: 12, fontWeight: "900", color: "rgba(255,255,255,0.88)" },
   chip_neutral: {
     backgroundColor: "rgba(255,255,255,0.10)",
     borderColor: "rgba(255,255,255,0.12)",
   },
-  chip_good: {
-    backgroundColor: "rgba(27,127,90,0.22)",
-    borderColor: "rgba(27,127,90,0.35)",
-  },
-  chip_warn: {
-    backgroundColor: "rgba(255,231,184,0.16)",
-    borderColor: "rgba(255,231,184,0.22)",
-  },
-  chip_bad: {
-    backgroundColor: "rgba(255,122,122,0.14)",
-    borderColor: "rgba(255,122,122,0.22)",
-  },
+  chip_good: { backgroundColor: "rgba(27,127,90,0.22)", borderColor: "rgba(27,127,90,0.35)" },
+  chip_warn: { backgroundColor: "rgba(255,231,184,0.16)", borderColor: "rgba(255,231,184,0.22)" },
+  chip_bad: { backgroundColor: "rgba(255,122,122,0.14)", borderColor: "rgba(255,122,122,0.22)" },
 
   card: {
     marginTop: 12,
@@ -1107,56 +1113,18 @@ const styles = StyleSheet.create({
   actionIcon: { fontSize: 18, opacity: 0.95 },
   actionTitle: { color: "white", fontWeight: "900", fontSize: 15 },
   actionTitleDestructive: { color: "rgba(255,200,200,0.95)" },
-  actionSub: {
-    marginTop: 3,
-    color: "rgba(255,255,255,0.55)",
-    fontWeight: "800",
-    fontSize: 12,
-  },
+  actionSub: { marginTop: 3, color: "rgba(255,255,255,0.55)", fontWeight: "800", fontSize: 12 },
   actionChev: { color: "rgba(255,255,255,0.60)", fontSize: 22, fontWeight: "900" },
 
-  rsvpRow: {
-    flexDirection: "row",
-    gap: 10,
-    marginTop: 8,
-  },
-  rsvpPill: {
-    flex: 1,
-    height: 46,
-    borderRadius: 14,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-  },
-  rsvpPillText: {
-    fontSize: 14,
-    fontWeight: "900",
-    color: "rgba(255,255,255,0.90)",
-    letterSpacing: 0.2,
-  },
-  rsvpPill_yes: {
-    backgroundColor: "rgba(27,127,90,0.18)",
-    borderColor: "rgba(27,127,90,0.35)",
-  },
-  rsvpPill_maybe: {
-    backgroundColor: "rgba(255,255,255,0.08)",
-    borderColor: "rgba(255,255,255,0.12)",
-  },
-  rsvpPill_no: {
-    backgroundColor: "rgba(255,122,122,0.10)",
-    borderColor: "rgba(255,122,122,0.22)",
-  },
-  rsvpPillActive: {
-    borderColor: "rgba(255,255,255,0.45)",
-  },
+  rsvpRow: { flexDirection: "row", gap: 10, marginTop: 8 },
+  rsvpPill: { flex: 1, height: 46, borderRadius: 14, alignItems: "center", justifyContent: "center", borderWidth: 1 },
+  rsvpPillText: { fontSize: 14, fontWeight: "900", color: "rgba(255,255,255,0.90)", letterSpacing: 0.2 },
+  rsvpPill_yes: { backgroundColor: "rgba(27,127,90,0.18)", borderColor: "rgba(27,127,90,0.35)" },
+  rsvpPill_maybe: { backgroundColor: "rgba(255,255,255,0.08)", borderColor: "rgba(255,255,255,0.12)" },
+  rsvpPill_no: { backgroundColor: "rgba(255,122,122,0.10)", borderColor: "rgba(255,122,122,0.22)" },
+  rsvpPillActive: { borderColor: "rgba(255,255,255,0.45)" },
 
-  userStatusNote: {
-    marginTop: 10,
-    textAlign: "center",
-    color: "rgba(255,255,255,0.70)",
-    fontSize: 13,
-    fontWeight: "800",
-  },
+  userStatusNote: { marginTop: 10, textAlign: "center", color: "rgba(255,255,255,0.70)", fontSize: 13, fontWeight: "800" },
 
   personRow: {
     flexDirection: "row",
@@ -1170,45 +1138,14 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.08)",
   },
-  personRowHighlight: {
-    borderColor: "rgba(27,127,90,0.35)",
-    backgroundColor: "rgba(27,127,90,0.12)",
-  },
+  personRowHighlight: { borderColor: "rgba(27,127,90,0.35)", backgroundColor: "rgba(27,127,90,0.12)" },
 
-  avatarSmWrap: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    overflow: "hidden",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.18)",
-  },
-  avatarSm: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-  },
-  avatarSmFallback: {
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.10)",
-  },
-  avatarSmText: {
-    fontWeight: "900",
-    color: "rgba(255,255,255,0.85)",
-    fontSize: 12,
-  },
-  personName: {
-    fontSize: 14,
-    fontWeight: "900",
-    color: "rgba(255,255,255,0.92)",
-  },
-  personSub: {
-    marginTop: 2,
-    fontSize: 12,
-    color: "rgba(255,255,255,0.60)",
-    fontWeight: "800",
-  },
+  avatarSmWrap: { width: 36, height: 36, borderRadius: 18, overflow: "hidden", borderWidth: 1, borderColor: "rgba(255,255,255,0.18)" },
+  avatarSm: { width: 36, height: 36, borderRadius: 18 },
+  avatarSmFallback: { alignItems: "center", justifyContent: "center", backgroundColor: "rgba(255,255,255,0.10)" },
+  avatarSmText: { fontWeight: "900", color: "rgba(255,255,255,0.85)", fontSize: 12 },
+  personName: { fontSize: 14, fontWeight: "900", color: "rgba(255,255,255,0.92)" },
+  personSub: { marginTop: 2, fontSize: 12, color: "rgba(255,255,255,0.60)", fontWeight: "800" },
 
   secondaryBtn: {
     marginTop: 14,
@@ -1220,9 +1157,5 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.10)",
   },
-  secondaryBtnText: {
-    color: "rgba(255,255,255,0.85)",
-    fontSize: 16,
-    fontWeight: "900",
-  },
+  secondaryBtnText: { color: "rgba(255,255,255,0.85)", fontSize: 16, fontWeight: "900" },
 });

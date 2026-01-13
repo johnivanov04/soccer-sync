@@ -1,4 +1,5 @@
 // app/_layout.tsx
+import * as ExpoLinking from "expo-linking";
 import * as Notifications from "expo-notifications";
 import { Slot, useRootNavigationState, useRouter, useSegments } from "expo-router";
 import React, { useCallback, useEffect, useRef, useState } from "react";
@@ -32,13 +33,13 @@ function RootNavigation() {
   const routeCount = (navState as any)?.routes?.length ?? 0;
   const isColdStart = navReady && routeCount <= 1;
 
-  // ✅ gate default auth redirects until we finish cold-start notification bootstrap
-  const [notifBootstrapDone, setNotifBootstrapDone] = useState(false);
+  // ✅ gate default auth redirects until we finish cold-start bootstrap
+  const [bootstrapDone, setBootstrapDone] = useState(false);
 
   // prevent handling the same notification twice
   const lastHandledNotificationIdRef = useRef<string | null>(null);
 
-  // If user taps notification while logged out / not ready
+  // If user taps notification / opens deep link while logged out / not ready
   const pendingRouteRef = useRef<PendingRoute>(null);
 
   // Track whether we already processed a tap this launch
@@ -102,6 +103,48 @@ function RootNavigation() {
     []
   );
 
+  // ✅ Parse deep links like:
+  // myapp://match/<matchId>
+  // myapp://match/chat/<matchId>
+  const buildTargetFromUrl = useCallback((url: string): PendingRoute => {
+    if (!url) return null;
+
+    try {
+      const parsed = ExpoLinking.parse(url);
+      const path = String(parsed?.path ?? "").replace(/^\/+/, "");
+      const parts = path.split("/").filter(Boolean);
+
+      // match/<id>
+      if (parts[0] === "match" && parts[1] && parts[1] !== "chat") {
+        return {
+          pathname: "/(app)/match/[matchId]",
+          params: { matchId: String(parts[1]) },
+        };
+      }
+
+      // match/chat/<id>
+      if (parts[0] === "match" && parts[1] === "chat" && parts[2]) {
+        return {
+          pathname: "/(app)/match/chat/[matchId]",
+          params: { matchId: String(parts[2]) },
+        };
+      }
+
+      // also support ?matchId=<id>
+      const qMatchId = (parsed as any)?.queryParams?.matchId;
+      if (qMatchId) {
+        return {
+          pathname: "/(app)/match/[matchId]",
+          params: { matchId: String(qMatchId) },
+        };
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
+  }, []);
+
   // ✅ navigation helper that preserves Back:
   // - cold start: seed Matches with replace(), then push target
   // - warm: push target normally
@@ -136,8 +179,7 @@ function RootNavigation() {
       if (!target) return;
 
       handledAnyThisLaunchRef.current = true;
-      // ✅ if we got a real tap/lastResponse, we can stop gating default redirects
-      setNotifBootstrapDone(true);
+      setBootstrapDone(true);
 
       // Store until ready/auth'd
       if (!navReady || initializing || !user) {
@@ -171,6 +213,48 @@ function RootNavigation() {
     }
   }, [handleNotificationResponse]);
 
+  // ✅ Handle deep links (initial + runtime)
+  const handleIncomingUrl = useCallback(
+    (url: string) => {
+      const target = buildTargetFromUrl(url);
+      if (!target) return;
+
+      handledAnyThisLaunchRef.current = true;
+      setBootstrapDone(true);
+
+      if (!navReady || initializing || !user) {
+        pendingRouteRef.current = target;
+        return;
+      }
+
+      navigateToTarget(target);
+    },
+    [buildTargetFromUrl, navReady, initializing, user, navigateToTarget]
+  );
+
+  useEffect(() => {
+    let sub: any;
+
+    (async () => {
+      try {
+        const initialUrl = await ExpoLinking.getInitialURL();
+        if (initialUrl) handleIncomingUrl(initialUrl);
+      } catch {}
+    })();
+
+    try {
+      sub = ExpoLinking.addEventListener("url", ({ url }) => {
+        if (url) handleIncomingUrl(url);
+      });
+    } catch {}
+
+    return () => {
+      try {
+        sub?.remove?.();
+      } catch {}
+    };
+  }, [handleIncomingUrl]);
+
   // Listen for notification taps + cold start recovery
   useEffect(() => {
     const sub = Notifications.addNotificationResponseReceivedListener((resp) => {
@@ -183,7 +267,7 @@ function RootNavigation() {
     const t2 = setTimeout(() => tryHandleLastResponse(), 1200);
 
     // ✅ After our bootstrap window, allow default auth routing if nothing was handled
-    const tDone = setTimeout(() => setNotifBootstrapDone(true), 1400);
+    const tDone = setTimeout(() => setBootstrapDone(true), 1400);
 
     return () => {
       sub.remove();
@@ -205,11 +289,10 @@ function RootNavigation() {
   useEffect(() => {
     if (!navReady || initializing) return;
 
-    // ✅ On cold start, wait until the notification bootstrap window has finished
-    if (isColdStart && !notifBootstrapDone) return;
+    // ✅ On cold start, wait until our bootstrap window has finished
+    if (isColdStart && !bootstrapDone) return;
 
     const inAuthGroup = segments[0] === "(auth)";
-    // ✅ FIX: no segments[1] indexing (avoids tuple typing issue)
     const inVerifyEmail = segments.includes("verify-email");
 
     if (!user) {
@@ -236,16 +319,7 @@ function RootNavigation() {
     if (inAuthGroup) {
       router.replace("/(app)/(tabs)/matches");
     }
-  }, [
-    navReady,
-    initializing,
-    user,
-    segments,
-    router,
-    isColdStart,
-    notifBootstrapDone,
-    navigateToTarget,
-  ]);
+  }, [navReady, initializing, user, segments, router, isColdStart, bootstrapDone, navigateToTarget]);
 
   if (initializing) return null;
   return <Slot />;
