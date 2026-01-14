@@ -3,7 +3,6 @@ import { useFocusEffect } from "@react-navigation/native";
 import { Image } from "expo-image";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import {
-  addDoc,
   collection,
   doc,
   documentId,
@@ -51,6 +50,13 @@ type ChatMessage = {
 
   // stable timestamp for grouping
   stableMs: number;
+};
+
+type LocalSendState = "sending" | "failed";
+
+type LocalMsg = ChatMessage & {
+  localState: LocalSendState;
+  clientCreatedAtMs: number;
 };
 
 type UserProfileMini = {
@@ -123,6 +129,10 @@ function avatarUri(photoURL?: string | null, versionMs?: number | null) {
   if (!photoURL) return null;
   const v = Number.isFinite(versionMs as any) ? String(versionMs) : "0";
   return photoURL.includes("?") ? `${photoURL}&v=${v}` : `${photoURL}?v=${v}`;
+}
+
+function makeClientMsgId(uid: string, matchId: string) {
+  return `${uid}_${matchId}_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`;
 }
 
 // ✅ Read from publicUsers (NOT users) to avoid permission issues
@@ -203,8 +213,8 @@ export default function MatchChatScreen() {
   const [lastMessageSeq, setLastMessageSeq] = useState<number>(0);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [localMsgs, setLocalMsgs] = useState<LocalMsg[]>([]);
   const [text, setText] = useState("");
-  const [sending, setSending] = useState(false);
 
   // ✅ per-match mute state (stored at users/{uid}/chatPrefs/{matchId})
   const [muted, setMuted] = useState(false);
@@ -213,7 +223,7 @@ export default function MatchChatScreen() {
   // ✅ Option A: profiles map so avatars update live
   const [userProfiles, setUserProfiles] = useState<Record<string, UserProfileMini>>({});
 
-  const listRef = useRef<FlatList<ChatMessage>>(null);
+  const listRef = useRef<FlatList<ChatMessage | LocalMsg>>(null);
   const didInitialScroll = useRef(false);
 
   // Freeze stable timestamps per message id
@@ -236,6 +246,21 @@ export default function MatchChatScreen() {
     setUnseenCount(0);
     setAtBottom(true);
   }, []);
+
+  // Merge live + local (dedupe by id)
+  const displayMessages = useMemo(() => {
+    const liveIds = new Set(messages.map((m) => m.id));
+    const pending = localMsgs.filter((m) => !liveIds.has(m.id));
+    const all: (ChatMessage | LocalMsg)[] = [...messages, ...pending];
+
+    all.sort((a, b) => {
+      const dt = a.stableMs - b.stableMs;
+      if (dt !== 0) return dt;
+      return a.id.localeCompare(b.id);
+    });
+
+    return all;
+  }, [messages, localMsgs]);
 
   // -------------------------------
   // ✅ Mark-as-read (SEQ + TIME)
@@ -460,6 +485,10 @@ export default function MatchChatScreen() {
         });
 
         setMessages(list);
+
+        // ✅ Remove local pending once Firestore echoes the id
+        const liveIds = new Set(list.map((m) => m.id));
+        setLocalMsgs((prev) => prev.filter((m) => !liveIds.has(m.id)));
       },
       {
         label: "chat:messages",
@@ -471,9 +500,11 @@ export default function MatchChatScreen() {
     return () => unsub();
   }, [matchIdStr]);
 
-  // ✅ Load public profiles for senders (avatars)
+  // ✅ Load public profiles for senders (avatars) — include locals too
   useEffect(() => {
-    const uids = Array.from(new Set(messages.map((m) => m.userId).filter(Boolean)));
+    const uids = Array.from(
+      new Set(displayMessages.map((m) => m.userId).filter(Boolean))
+    );
     if (uids.length === 0) return;
 
     let cancelled = false;
@@ -494,12 +525,12 @@ export default function MatchChatScreen() {
     return () => {
       cancelled = true;
     };
-  }, [messages]);
+  }, [displayMessages]);
 
   // Initial scroll
   useEffect(() => {
     if (didInitialScroll.current) return;
-    if (messages.length === 0) return;
+    if (displayMessages.length === 0) return;
 
     requestAnimationFrame(() => {
       listRef.current?.scrollToEnd({ animated: false });
@@ -507,26 +538,26 @@ export default function MatchChatScreen() {
       setAtBottom(true);
       setUnseenCount(0);
     });
-  }, [messages.length]);
+  }, [displayMessages.length]);
 
   // Keep pinned to bottom if you're already at bottom
   useEffect(() => {
     if (!didInitialScroll.current) return;
     if (!atBottom) return;
-    if (messages.length === 0) return;
+    if (displayMessages.length === 0) return;
     scrollToBottom(false);
-  }, [messages.length, atBottom, scrollToBottom]);
+  }, [displayMessages.length, atBottom, scrollToBottom]);
 
   // Unseen count when new messages arrive while you're scrolled up
   useEffect(() => {
-    const lastId = messages[messages.length - 1]?.id ?? null;
+    const lastId = displayMessages[displayMessages.length - 1]?.id ?? null;
     if (!lastId) return;
 
     if (lastMsgIdRef.current && lastMsgIdRef.current !== lastId && !atBottom) {
       setUnseenCount((c) => Math.min(99, c + 1));
     }
     lastMsgIdRef.current = lastId;
-  }, [messages, atBottom]);
+  }, [displayMessages, atBottom]);
 
   const canSend = useMemo(() => {
     return (
@@ -534,10 +565,45 @@ export default function MatchChatScreen() {
       !!matchIdStr &&
       !!matchTeamId &&
       text.trim().length > 0 &&
-      text.trim().length <= 500 &&
-      !sending
+      text.trim().length <= 500
     );
-  }, [user?.uid, matchIdStr, matchTeamId, text, sending]);
+  }, [user?.uid, matchIdStr, matchTeamId, text]);
+
+  const retryLocalMessage = useCallback(
+    async (m: LocalMsg) => {
+      if (!user?.uid) return Alert.alert("Please sign in");
+      if (!matchIdStr) return Alert.alert("Missing match id");
+      if (!matchTeamId) return Alert.alert("Match not found");
+
+      setLocalMsgs((prev) =>
+        prev.map((x) => (x.id === m.id ? { ...x, localState: "sending" } : x))
+      );
+
+      try {
+        await setDoc(
+          doc(db, "matchMessages", m.id),
+          {
+            matchId: matchIdStr,
+            teamId: matchTeamId,
+            userId: user.uid,
+            displayName: m.displayName,
+            photoURL: m.photoURL ?? null,
+            text: m.text,
+            createdAt: serverTimestamp(),
+            createdAtClientMs: m.clientCreatedAtMs ?? Date.now(),
+            clientMsgId: m.id,
+          },
+          { merge: true }
+        );
+      } catch (e) {
+        console.error("Retry send failed:", e);
+        setLocalMsgs((prev) =>
+          prev.map((x) => (x.id === m.id ? { ...x, localState: "failed" } : x))
+        );
+      }
+    },
+    [user?.uid, matchIdStr, matchTeamId]
+  );
 
   const handleSend = async () => {
     if (!user?.uid) return Alert.alert("Please sign in");
@@ -549,8 +615,6 @@ export default function MatchChatScreen() {
     if (body.length > 500) return Alert.alert("Too long", "Keep under 500 characters.");
 
     try {
-      setSending(true);
-
       let displayName = user.email ?? "Player";
       let photoURL: string | null = null;
 
@@ -577,28 +641,63 @@ export default function MatchChatScreen() {
         { merge: true }
       );
 
-      await addDoc(collection(db, "matchMessages"), {
-        matchId: matchIdStr,
-        teamId: matchTeamId,
-        userId: user.uid,
-        displayName,
-        photoURL: photoURL ?? null,
-        text: body,
-        createdAt: serverTimestamp(),
-      });
+      // ✅ Optimistic bubble (idempotent retry)
+      const clientId = makeClientMsgId(user.uid, matchIdStr);
+      const now = Date.now();
+
+      setLocalMsgs((prev) => [
+        ...prev,
+        {
+          id: clientId,
+          matchId: matchIdStr,
+          teamId: matchTeamId,
+          userId: user.uid,
+          displayName,
+          text: body,
+          photoURL: photoURL ?? null,
+          createdAt: null,
+          stableMs: now,
+          localState: "sending",
+          clientCreatedAtMs: now,
+        },
+      ]);
 
       setText("");
-
       requestAnimationFrame(() => {
         listRef.current?.scrollToEnd({ animated: true });
       });
 
+      await setDoc(
+        doc(db, "matchMessages", clientId),
+        {
+          matchId: matchIdStr,
+          teamId: matchTeamId,
+          userId: user.uid,
+          displayName,
+          photoURL: photoURL ?? null,
+          text: body,
+          createdAt: serverTimestamp(),
+          createdAtClientMs: now,
+          clientMsgId: clientId,
+        },
+        { merge: true }
+      );
+
       scheduleMarkChatRead();
     } catch (e) {
       console.error("Send message error:", e);
-      Alert.alert("Error", "Could not send message.");
-    } finally {
-      setSending(false);
+
+      // Mark the newest local message as failed (best-effort)
+      setLocalMsgs((prev) => {
+        const copy = [...prev];
+        for (let i = copy.length - 1; i >= 0; i--) {
+          if (copy[i].userId === user?.uid && copy[i].localState === "sending") {
+            copy[i] = { ...copy[i], localState: "failed" };
+            break;
+          }
+        }
+        return copy;
+      });
     }
   };
 
@@ -622,7 +721,10 @@ export default function MatchChatScreen() {
       <View style={styles.centerWrap}>
         <View style={styles.stateCard}>
           <Text style={styles.stateTitle}>Missing match id</Text>
-          <Pressable onPress={handleBack} style={({ pressed }) => [styles.secondaryBtn, pressed && styles.pressed]}>
+          <Pressable
+            onPress={handleBack}
+            style={({ pressed }) => [styles.secondaryBtn, pressed && styles.pressed]}
+          >
             <Text style={styles.secondaryBtnText}>Back</Text>
           </Pressable>
         </View>
@@ -647,7 +749,10 @@ export default function MatchChatScreen() {
         <View style={styles.stateCard}>
           <Text style={styles.stateTitle}>Match not found</Text>
           <Text style={styles.stateSubtle}>You may not have access, or it was deleted.</Text>
-          <Pressable onPress={handleBack} style={({ pressed }) => [styles.secondaryBtn, pressed && styles.pressed]}>
+          <Pressable
+            onPress={handleBack}
+            style={({ pressed }) => [styles.secondaryBtn, pressed && styles.pressed]}
+          >
             <Text style={styles.secondaryBtnText}>Back</Text>
           </Pressable>
         </View>
@@ -701,7 +806,7 @@ export default function MatchChatScreen() {
           ref={listRef}
           style={{ flex: 1 }}
           contentContainerStyle={styles.messagesContainer}
-          data={messages}
+          data={displayMessages}
           keyExtractor={(m) => m.id}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="on-drag"
@@ -731,8 +836,8 @@ export default function MatchChatScreen() {
             const initials = initialsFromName(nameForInitials);
             const uri = avatarUri(prof?.photoURL ?? null, prof?.photoVersionMs ?? null);
 
-            const prev = messages[index - 1];
-            const next = messages[index + 1];
+            const prev = displayMessages[index - 1];
+            const next = displayMessages[index + 1];
 
             const tCur = item.stableMs;
             const tPrev = prev?.stableMs ?? 0;
@@ -752,14 +857,50 @@ export default function MatchChatScreen() {
               tNext > 0 &&
               minutesDiffMs(tCur, tNext) <= CLUSTER_MINUTES;
 
-            const isClusterStart = !joinsPrev;
             const isClusterEnd = !joinsNext;
-
-            const showMeta = META_ON_FIRST_MESSAGE_IN_CLUSTER ? isClusterStart : isClusterEnd;
+            const showMeta = META_ON_FIRST_MESSAGE_IN_CLUSTER ? !joinsPrev : isClusterEnd;
 
             const showDateSeparator = tCur > 0 && (!prev || !isSameDayMs(tCur, tPrev));
             const timeLabel = showMeta ? formatTimeMs(tCur) : "";
             const spacing = joinsPrev ? 4 : 12;
+
+            const isLocal = (item as any)?.localState != null;
+            const localState: LocalSendState | null = isLocal ? (item as any).localState : null;
+            const isFailed = localState === "failed";
+
+            const BubbleInner = (
+              <>
+                {!mine && showMeta && <Text style={styles.bubbleName}>{item.displayName}</Text>}
+                <Text style={styles.bubbleText}>{item.text}</Text>
+
+                {showMeta && !!timeLabel && <Text style={styles.timeText}>{timeLabel}</Text>}
+
+                {mine && isLocal && localState === "sending" && (
+                  <Text style={styles.sendState}>Sending…</Text>
+                )}
+                {mine && isLocal && localState === "failed" && (
+                  <Text style={styles.sendStateError}>Failed • Tap to retry</Text>
+                )}
+              </>
+            );
+
+            const Bubble =
+              mine && isFailed ? (
+                <Pressable
+                  onPress={() => retryLocalMessage(item as LocalMsg)}
+                  style={[
+                    styles.bubble,
+                    styles.bubbleMine,
+                    { borderColor: "rgba(255, 140, 140, 0.45)" },
+                  ]}
+                >
+                  {BubbleInner}
+                </Pressable>
+              ) : (
+                <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleOther]}>
+                  {BubbleInner}
+                </View>
+              );
 
             return (
               <View style={{ marginTop: spacing }}>
@@ -790,11 +931,7 @@ export default function MatchChatScreen() {
                     <View style={styles.avatarSpacer} />
                   )}
 
-                  <View style={[styles.bubble, mine ? styles.bubbleMine : styles.bubbleOther]}>
-                    {!mine && showMeta && <Text style={styles.bubbleName}>{item.displayName}</Text>}
-                    <Text style={styles.bubbleText}>{item.text}</Text>
-                    {showMeta && !!timeLabel && <Text style={styles.timeText}>{timeLabel}</Text>}
-                  </View>
+                  {Bubble}
 
                   {mine ? (
                     showMeta ? (
@@ -819,13 +956,10 @@ export default function MatchChatScreen() {
           }}
         />
 
-        {!atBottom && messages.length > 0 && (
+        {!atBottom && displayMessages.length > 0 && (
           <Pressable
             onPress={() => scrollToBottom(true)}
-            style={({ pressed }) => [
-              styles.scrollFab,
-              pressed && { transform: [{ scale: 0.98 }] },
-            ]}
+            style={({ pressed }) => [styles.scrollFab, pressed && { transform: [{ scale: 0.98 }] }]}
           >
             <Text style={styles.scrollFabText}>
               ↓ {unseenCount > 0 ? `(${unseenCount})` : ""}
@@ -861,7 +995,7 @@ export default function MatchChatScreen() {
             pressed && canSend && styles.pressed,
           ]}
         >
-          <Text style={styles.sendBtnText}>{sending ? "…" : "Send"}</Text>
+          <Text style={styles.sendBtnText}>Send</Text>
         </Pressable>
       </View>
     </KeyboardAvoidingView>
@@ -1020,7 +1154,29 @@ const styles = StyleSheet.create({
 
   bubbleName: { fontSize: 12, fontWeight: "900", marginBottom: 6, color: "rgba(255,255,255,0.78)" },
   bubbleText: { color: "white", fontSize: 15, fontWeight: "700", lineHeight: 20 },
-  timeText: { marginTop: 8, fontSize: 11, color: "rgba(255,255,255,0.55)", alignSelf: "flex-end", fontWeight: "800" },
+  timeText: {
+    marginTop: 8,
+    fontSize: 11,
+    color: "rgba(255,255,255,0.55)",
+    alignSelf: "flex-end",
+    fontWeight: "800",
+  },
+
+  // ✅ Local send states
+  sendState: {
+    marginTop: 6,
+    fontSize: 11,
+    fontWeight: "800",
+    color: "rgba(255,255,255,0.55)",
+    alignSelf: "flex-end",
+  },
+  sendStateError: {
+    marginTop: 6,
+    fontSize: 11,
+    fontWeight: "900",
+    color: "rgba(255,140,140,0.95)",
+    alignSelf: "flex-end",
+  },
 
   // Date separator
   dateSepWrap: { alignItems: "center", marginBottom: 8, marginTop: 2 },
