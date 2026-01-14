@@ -104,33 +104,63 @@ function RootNavigation() {
   );
 
   // ✅ Parse deep links like:
-  // myapp://match/<matchId>
-  // myapp://match/chat/<matchId>
+  // soccersyncmobile://match/<matchId>
+  // soccersyncmobile://match/chat/<matchId>
+  //
+  // IMPORTANT: In scheme URLs, "match" is often treated as hostname, not path.
+  // ExpoLinking.parse("soccersyncmobile://match/chat/123") =>
+  //   hostname="match", path="chat/123"
   const buildTargetFromUrl = useCallback((url: string): PendingRoute => {
     if (!url) return null;
 
     try {
       const parsed = ExpoLinking.parse(url);
+
+      const host = String((parsed as any)?.hostname ?? (parsed as any)?.host ?? "").toLowerCase();
       const path = String(parsed?.path ?? "").replace(/^\/+/, "");
       const parts = path.split("/").filter(Boolean);
 
-      // match/<id>
-      if (parts[0] === "match" && parts[1] && parts[1] !== "chat") {
-        return {
-          pathname: "/(app)/match/[matchId]",
-          params: { matchId: String(parts[1]) },
-        };
+      // ✅ Style A: soccersyncmobile://match/chat/<id>  (host="match", path="chat/<id>")
+      // ✅ Style A: soccersyncmobile://match/<id>       (host="match", path="<id>")
+      if (host === "match") {
+        if (parts[0] && parts[0] !== "chat") {
+          return {
+            pathname: "/(app)/match/[matchId]",
+            params: { matchId: String(parts[0]) },
+          };
+        }
+
+        if (parts[0] === "chat" && parts[1]) {
+          return {
+            pathname: "/(app)/match/chat/[matchId]",
+            params: { matchId: String(parts[1]) },
+          };
+        }
       }
 
-      // match/chat/<id>
-      if (parts[0] === "match" && parts[1] === "chat" && parts[2]) {
-        return {
-          pathname: "/(app)/match/chat/[matchId]",
-          params: { matchId: String(parts[2]) },
-        };
+      // ✅ Style B: soccersyncmobile:///match/chat/<id> (path starts with match)
+      // ✅ Style B: soccersyncmobile:///match/<id>
+      const idx = parts.findIndex((p) => p === "match");
+      if (idx >= 0) {
+        const p1 = parts[idx + 1];
+        const p2 = parts[idx + 2];
+
+        if (p1 && p1 !== "chat") {
+          return {
+            pathname: "/(app)/match/[matchId]",
+            params: { matchId: String(p1) },
+          };
+        }
+
+        if (p1 === "chat" && p2) {
+          return {
+            pathname: "/(app)/match/chat/[matchId]",
+            params: { matchId: String(p2) },
+          };
+        }
       }
 
-      // also support ?matchId=<id>
+      // ✅ also support ?matchId=<id>
       const qMatchId = (parsed as any)?.queryParams?.matchId;
       if (qMatchId) {
         return {
