@@ -263,9 +263,40 @@ export default function MatchChatScreen() {
   }, [messages, localMsgs]);
 
   // -------------------------------
-  // ✅ Mark-as-read (SEQ + TIME)
+  // ✅ Mark-as-read (SEQ + TIME) — FIXED for cold start
   // -------------------------------
   const markReadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Cache the lastReadSeq we already have on the server so we NEVER write a smaller seq (rules require monotonic)
+  const lastReadSeqRef = useRef<number>(0);
+  const lastReadSeqLoadedRef = useRef<boolean>(false);
+
+  // Subscribe to my chatReads doc (keeps lastReadSeqRef current; also makes cold start safe)
+  useEffect(() => {
+    if (!user?.uid || !matchIdStr) {
+      lastReadSeqRef.current = 0;
+      lastReadSeqLoadedRef.current = false;
+      return;
+    }
+
+    const ref = doc(db, "users", user.uid, "chatReads", matchIdStr);
+    const unsub = onSnapshotSafe(
+      ref,
+      (snap) => {
+        const d = (snap.data() as any) ?? {};
+        const seq = typeof d?.lastReadSeq === "number" ? d.lastReadSeq : 0;
+        lastReadSeqRef.current = seq;
+        lastReadSeqLoadedRef.current = true;
+      },
+      {
+        label: "chat:myChatReads",
+        onError: () => {},
+        onPermissionDenied: () => {},
+      }
+    );
+
+    return () => unsub();
+  }, [user?.uid, matchIdStr]);
 
   const markChatReadNow = useCallback(async () => {
     if (!user?.uid || !matchIdStr) return;
@@ -273,15 +304,35 @@ export default function MatchChatScreen() {
     try {
       const ref = doc(db, "users", user.uid, "chatReads", matchIdStr);
 
+      // ✅ Cold-start safeguard: if we haven't loaded the existing doc yet,
+      // fetch it once so we don't accidentally write seq=0 and violate monotonic rules.
+      if (!lastReadSeqLoadedRef.current) {
+        try {
+          const snap = await getDoc(ref);
+          const d = snap.exists() ? (snap.data() as any) : {};
+          lastReadSeqRef.current = typeof d?.lastReadSeq === "number" ? d.lastReadSeq : 0;
+        } catch {
+          // ignore (we'll still try with current ref value)
+        } finally {
+          lastReadSeqLoadedRef.current = true;
+        }
+      }
+
+      const desiredSeq = Number.isFinite(lastMessageSeq) ? lastMessageSeq : 0;
+      const safeSeq = Math.max(lastReadSeqRef.current || 0, desiredSeq);
+
       await setDoc(
         ref,
         {
           lastReadAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
-          lastReadSeq: Number.isFinite(lastMessageSeq) ? lastMessageSeq : 0,
+          lastReadSeq: safeSeq,
         },
         { merge: true }
       );
+
+      // keep local cache in sync (prevents churn)
+      lastReadSeqRef.current = safeSeq;
     } catch (e) {
       console.warn("markChatReadNow failed:", e);
     }
@@ -982,6 +1033,8 @@ export default function MatchChatScreen() {
               maxLength={500}
               multiline
               keyboardAppearance="dark"
+              keyboardType="default"
+              autoCorrect
             />
           </View>
         </View>

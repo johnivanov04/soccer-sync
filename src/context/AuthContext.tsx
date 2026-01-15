@@ -1,7 +1,4 @@
 // src/context/AuthContext.tsx
-import React, { createContext, useContext, useEffect, useRef, useState } from "react";
-import { Platform } from "react-native";
-
 import {
   createUserWithEmailAndPassword,
   signOut as fbSignOut,
@@ -13,25 +10,20 @@ import {
   updateProfile,
   User,
 } from "firebase/auth";
-
 import { arrayUnion, doc, serverTimestamp, setDoc } from "firebase/firestore";
-
+import React, { createContext, useContext, useEffect, useRef, useState } from "react";
+import { Platform } from "react-native";
 import { auth, db } from "../firebaseConfig";
 import { registerForPushNotificationsAsync } from "../utils/pushNotifications";
 
 interface AuthContextValue {
   user: User | null;
   initializing: boolean;
-
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (email: string, password: string, displayName?: string) => Promise<void>;
   signOut: () => Promise<void>;
-
-  // ✅ Email verification
   sendVerificationEmail: () => Promise<void>;
   refreshUser: () => Promise<void>;
-
-  // ✅ Forgot password
   resetPassword: (email: string) => Promise<void>;
 }
 
@@ -41,7 +33,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
   const [initializing, setInitializing] = useState(true);
 
-  // Avoid double-registering tokens if auth state flips quickly
   const pushSetupDoneForUidRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -58,8 +49,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       pushSetupDoneForUidRef.current = fbUser.uid;
 
       const userRef = doc(db, "users", fbUser.uid);
+      const publicRef = doc(db, "publicUsers", fbUser.uid);
 
-      // Ensure /users/{uid} exists
+      // ✅ Ensure /users/{uid} exists (private)
       try {
         await setDoc(
           userRef,
@@ -75,7 +67,23 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         console.warn("Could not upsert user profile doc", e);
       }
 
-      // Register push token + store it (multi-device safe)
+      // ✅ Ensure /publicUsers/{uid} exists (safe public profile)
+      try {
+        await setDoc(
+          publicRef,
+          {
+            ...(fbUser.displayName ? { displayName: fbUser.displayName } : {}),
+            ...(fbUser.photoURL ? { photoURL: fbUser.photoURL } : {}),
+            photoUpdatedAtMs: Date.now(),
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+      } catch (e) {
+        console.warn("Could not upsert public user doc", e);
+      }
+
+      // ✅ Register push token + store it (multi-device safe)
       try {
         const expoPushToken = await registerForPushNotificationsAsync();
         if (!expoPushToken) return;
@@ -83,7 +91,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         await setDoc(
           userRef,
           {
-            expoPushToken,
+            expoPushToken, // optional “latest”
             expoPushTokens: arrayUnion(expoPushToken),
             expoPushTokenPlatform: Platform.OS,
             expoPushTokenUpdatedAt: serverTimestamp(),
@@ -114,7 +122,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       }
     }
 
-    // ✅ send verification email on signup (don’t block if it fails)
     try {
       await sendEmailVerification(fbUser);
     } catch (err) {
@@ -122,12 +129,24 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }
 
     const userRef = doc(db, "users", fbUser.uid);
+    const publicRef = doc(db, "publicUsers", fbUser.uid);
+
     await setDoc(
       userRef,
       {
         email: fbUser.email ?? email,
         ...(displayName && displayName.trim() ? { displayName: displayName.trim() } : {}),
         createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    await setDoc(
+      publicRef,
+      {
+        ...(displayName && displayName.trim() ? { displayName: displayName.trim() } : {}),
+        photoUpdatedAtMs: Date.now(),
         updatedAt: serverTimestamp(),
       },
       { merge: true }
@@ -148,7 +167,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     const u = auth.currentUser;
     if (!u) throw new Error("Not signed in.");
     await reload(u);
-    // reload() sometimes doesn't fire onAuthStateChanged; update state manually
     setUser(auth.currentUser);
   };
 
