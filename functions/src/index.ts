@@ -151,6 +151,36 @@ async function sendExpoPushMany(messages: PushMessage[], tokenToUid?: Map<string
   }
 }
 
+// -------------------- OPTION 1 helper: ALL ACTIVE TEAM MEMBERS --------------------
+// Pull all active members for a team from memberships.
+async function getActiveTeamMemberUids(teamId: string): Promise<string[]> {
+  const tid = String(teamId ?? "").trim();
+  if (!tid) return [];
+
+  const snap = await db
+    .collection("memberships")
+    .where("teamId", "==", tid)
+    .where("status", "==", "active")
+    .get();
+
+  const out: string[] = [];
+  for (const d of snap.docs) {
+    const m = d.data() as any;
+
+    // Prefer explicit field
+    let uid = m?.userId ? String(m.userId) : "";
+
+    // Fallback: memberships docId is `${teamId}_${uid}` (teamId has no underscores)
+    if (!uid && typeof d.id === "string" && d.id.startsWith(`${tid}_`)) {
+      uid = d.id.slice(`${tid}_`.length);
+    }
+
+    if (uid) out.push(uid);
+  }
+
+  return uniqStrings(out);
+}
+
 // -------------------- OPTION 5: TEAMS + MEMBERSHIPS --------------------
 function normalizeCode(raw: any) {
   return String(raw ?? "").trim().toLowerCase();
@@ -910,43 +940,46 @@ export const onMatchMessageCreate = onDocumentCreated("matchMessages/{msgId}", a
   if (!txRes.ok) return;
   if (!txRes.claimed) return;
 
-  // ---- Recipients (yes/maybe + host) ----
+  // ---- Recipients (OPTION 1): ALL ACTIVE TEAM MEMBERS + host (safe) ----
   const matchSnap = await matchRef.get();
   if (!matchSnap.exists) return;
 
   const match = matchSnap.data() as any;
-  const hostId = match?.createdBy ? String(match.createdBy) : null;
+  const teamId = String(match?.teamId ?? data?.teamId ?? "");
+  const hostId = match?.createdBy ? String(match.createdBy) : "";
 
-  const rsvpSnap = await db.collection("rsvps").where("matchId", "==", matchId).get();
+  // Team-wide recipients
+  const activeTeamUids = teamId ? await getActiveTeamMemberUids(teamId) : [];
 
-  const recipientIds: string[] = [];
-  for (const d of rsvpSnap.docs) {
-    const r = d.data() as any;
-    const uid = r?.userId ? String(r.userId) : "";
-    const st = String(r?.status ?? "").toLowerCase();
-    if (!uid) continue;
-    if (st === "yes" || st === "maybe") recipientIds.push(uid);
+  // Include host as a backstop (even if membership data is ever inconsistent)
+  const recipientIds = uniqStrings([...activeTeamUids, ...(hostId ? [hostId] : [])]).filter(
+    (uid) => uid && uid !== senderId
+  );
+
+  if (recipientIds.length === 0) {
+    await msgRef.set(
+      { notifiedAt: FieldValue.serverTimestamp(), notifyTokenCount: 0, notifyReason: "noRecipients" },
+      { merge: true }
+    );
+    return;
   }
-  if (hostId) recipientIds.push(hostId);
-
-  const finalRecipientIds = uniqStrings(recipientIds).filter((uid) => uid !== senderId);
 
   // ✅ mute set (by UID)
   let mutedSet = new Set<string>();
   try {
-    mutedSet = await getMutedUidsForMatch(finalRecipientIds, matchId);
+    mutedSet = await getMutedUidsForMatch(recipientIds, matchId);
   } catch (e) {
     console.warn("getMutedUidsForMatch failed:", e);
     mutedSet = new Set<string>();
   }
 
-  const recipientsAfterMute = finalRecipientIds.filter((uid) => !mutedSet.has(uid));
+  const recipientsAfterMute = recipientIds.filter((uid) => !mutedSet.has(uid));
 
   // ✅ Token-level mute suppression (handles Expo Go token shared across accounts)
   const tokensByUid = new Map<string, string[]>();
   const tokenOwners = new Map<string, Set<string>>();
 
-  for (const uid of finalRecipientIds) {
+  for (const uid of recipientIds) {
     const tokens = await getUserTokens(uid);
     tokensByUid.set(uid, tokens);
 
@@ -1007,7 +1040,9 @@ export const onMatchMessageCreate = onDocumentCreated("matchMessages/{msgId}", a
 
   await msgRef.set(
     {
-      notifyRecipientCountBeforeMute: finalRecipientIds.length,
+      notifyMode: "teamActiveMembers",
+      notifyTeamId: teamId || null,
+      notifyRecipientCountBeforeMute: recipientIds.length,
       notifyRecipientCountAfterMute: recipientsAfterMute.length,
       notifyMutedSkippedCount: mutedSet.size,
       notifyMutedTokenCount: mutedTokens.size,
