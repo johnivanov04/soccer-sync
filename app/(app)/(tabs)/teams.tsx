@@ -254,6 +254,7 @@ function PersonRow({
     </View>
   );
 }
+//cheating
 
 export default function TeamsScreen() {
   const { user } = useAuth();
