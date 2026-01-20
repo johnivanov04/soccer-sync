@@ -101,13 +101,7 @@ function GlassCard({ children }: { children: React.ReactNode }) {
   return <View style={styles.card}>{children}</View>;
 }
 
-function SectionTitle({
-  title,
-  subtitle,
-}: {
-  title: string;
-  subtitle?: string;
-}) {
+function SectionTitle({ title, subtitle }: { title: string; subtitle?: string }) {
   return (
     <View style={{ marginBottom: 10 }}>
       <Text style={styles.sectionTitle}>{title}</Text>
@@ -233,6 +227,12 @@ function InputRow({
   );
 }
 
+/**
+ * ✅ FIX: Prevent action buttons from overflowing off-screen
+ * - Make the center text area shrinkable via minWidth: 0
+ * - Constrain the right side width and allow wrapping
+ * - Ellipsize long names/subtitles
+ */
 function PersonRow({
   name,
   subtitle,
@@ -249,12 +249,18 @@ function PersonRow({
         <Text style={styles.avatarText}>{initials}</Text>
       </View>
 
-      <View style={{ flex: 1 }}>
-        <Text style={styles.rowTitle}>{name}</Text>
-        {!!subtitle && <Text style={styles.rowSub}>{subtitle}</Text>}
+      <View style={styles.rowMain}>
+        <Text style={styles.rowTitle} numberOfLines={1} ellipsizeMode="tail">
+          {name}
+        </Text>
+        {!!subtitle && (
+          <Text style={styles.rowSub} numberOfLines={1} ellipsizeMode="tail">
+            {subtitle}
+          </Text>
+        )}
       </View>
 
-      {!!right && <View style={{ marginLeft: 10 }}>{right}</View>}
+      {!!right && <View style={styles.rowRight}>{right}</View>}
     </View>
   );
 }
@@ -309,7 +315,7 @@ export default function TeamsScreen() {
   const fnRotateInviteCode = useMemo(() => httpsCallable(functions, "rotateInviteCode"), []);
   const fnCancelMyPending = useMemo(() => httpsCallable(functions, "cancelMyPendingMembership"), []);
 
-  // ✅ NEW: Role management (owner-only)
+  // Role management (owner-only)
   const fnPromoteAdmin = useMemo(() => httpsCallable(functions, "promoteAdmin"), []);
   const fnDemoteAdmin = useMemo(() => httpsCallable(functions, "demoteAdmin"), []);
   const fnTransferOwnership = useMemo(() => httpsCallable(functions, "transferOwnership"), []);
@@ -653,7 +659,7 @@ export default function TeamsScreen() {
     }
   };
 
-  // ✅ NEW: owner-only role actions
+  // owner-only role actions
   const handlePromoteAdmin = async (targetUid: string) => {
     if (!activeMembershipRaw?.teamId) return;
     setSaving(true);
@@ -778,8 +784,7 @@ export default function TeamsScreen() {
               </View>
 
               <Text style={styles.cardText}>
-                Invite code{" "}
-                <Text style={styles.cardTextStrong}>{inviteCode || "(none)"}</Text>
+                Invite code <Text style={styles.cardTextStrong}>{inviteCode || "(none)"}</Text>
               </Text>
 
               <View style={{ height: 14 }} />
@@ -852,7 +857,7 @@ export default function TeamsScreen() {
                         name={name}
                         subtitle={sub}
                         right={
-                          <View style={{ flexDirection: "row", gap: 8 }}>
+                          <View style={styles.actionWrap}>
                             <SmallButton
                               title="Approve"
                               onPress={() => handleApprove(r.userId)}
@@ -885,17 +890,14 @@ export default function TeamsScreen() {
                 {members.map((m, idx) => {
                   const isMe = m.userId === user.uid;
 
-                  // ✅ Kick rules:
-                  // - admin can remove members only
-                  // - owner can remove members + admins
-                  // - nobody can remove owner
+                  // Kick rules:
                   const canKick =
                     isAdmin &&
                     !isMe &&
                     m.role !== "owner" &&
                     (m.role === "member" || (isOwner && m.role === "admin"));
 
-                  // ✅ Role management: owner-only
+                  // Role management: owner-only
                   const canPromote = isOwner && !isMe && m.role === "member";
                   const canDemote = isOwner && !isMe && m.role === "admin";
                   const canTransfer = isOwner && !isMe && m.role !== "owner";
@@ -960,16 +962,7 @@ export default function TeamsScreen() {
                         subtitle={sub}
                         right={
                           rightActions.length ? (
-                            <View
-                              style={{
-                                flexDirection: "row",
-                                gap: 8,
-                                flexWrap: "wrap",
-                                justifyContent: "flex-end",
-                              }}
-                            >
-                              {rightActions}
-                            </View>
+                            <View style={styles.actionWrap}>{rightActions}</View>
                           ) : null
                         }
                       />
@@ -1257,6 +1250,27 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     gap: 12,
   },
+
+  // ✅ new layout pieces for PersonRow
+  rowMain: {
+    flex: 1,
+    minWidth: 0, // ✅ critical for ellipsizing / allowing right side to fit
+  },
+  rowRight: {
+    marginLeft: 10,
+    flexShrink: 1,
+    maxWidth: "62%", // tweak 55–70% if you want
+    alignItems: "flex-end",
+  },
+
+  // ✅ shared action wrapper (wrap chips instead of overflowing)
+  actionWrap: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
+    gap: 8,
+  },
+
   divider: {
     height: StyleSheet.hairlineWidth,
     backgroundColor: "rgba(255,255,255,0.10)",
