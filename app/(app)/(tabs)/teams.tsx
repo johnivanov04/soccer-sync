@@ -33,6 +33,7 @@ type Team = {
   defaultMaxPlayers?: number;
   inviteCode?: string; // rotatable
   createdBy?: string;
+  ownerId?: string; // optional (server may set)
 };
 
 type Membership = {
@@ -65,13 +66,16 @@ function prettyFnError(e: any) {
   const code = String(e?.code ?? "");
 
   if (code.includes("failed-precondition") || msg.toLowerCase().includes("failed-precondition")) {
-    return "That action isn’t allowed right now (likely already in a team / owner cannot leave).";
+    return "That action isn’t allowed right now (role restrictions / ownership transfer required).";
   }
   if (code.includes("permission-denied") || msg.toLowerCase().includes("permission")) {
     return "Permission denied.";
   }
   if (code.includes("not-found") || msg.toLowerCase().includes("not found")) {
     return "Not found.";
+  }
+  if (code.includes("invalid-argument") || msg.toLowerCase().includes("invalid")) {
+    return "Invalid request.";
   }
   return msg || "Something went wrong.";
 }
@@ -254,6 +258,7 @@ function PersonRow({
     </View>
   );
 }
+
 //cheating
 
 export default function TeamsScreen() {
@@ -292,6 +297,7 @@ export default function TeamsScreen() {
 
   const myRole = activeMembership?.role ?? null;
   const isAdmin = isAdminRole(myRole ?? undefined);
+  const isOwner = myRole === "owner";
 
   // Callables
   const fnCreateTeam = useMemo(() => httpsCallable(functions, "createTeam"), []);
@@ -302,6 +308,11 @@ export default function TeamsScreen() {
   const fnKickMember = useMemo(() => httpsCallable(functions, "kickMember"), []);
   const fnRotateInviteCode = useMemo(() => httpsCallable(functions, "rotateInviteCode"), []);
   const fnCancelMyPending = useMemo(() => httpsCallable(functions, "cancelMyPendingMembership"), []);
+
+  // ✅ NEW: Role management (owner-only)
+  const fnPromoteAdmin = useMemo(() => httpsCallable(functions, "promoteAdmin"), []);
+  const fnDemoteAdmin = useMemo(() => httpsCallable(functions, "demoteAdmin"), []);
+  const fnTransferOwnership = useMemo(() => httpsCallable(functions, "transferOwnership"), []);
 
   // 1) Listen to my memberships
   useEffect(() => {
@@ -606,6 +617,7 @@ export default function TeamsScreen() {
 
   const handleKick = async (uid: string) => {
     if (!activeMembershipRaw?.teamId) return;
+
     Alert.alert("Remove member?", "They’ll be removed from the team.", [
       { text: "Cancel", style: "cancel" },
       {
@@ -639,6 +651,63 @@ export default function TeamsScreen() {
     } finally {
       setSaving(false);
     }
+  };
+
+  // ✅ NEW: owner-only role actions
+  const handlePromoteAdmin = async (targetUid: string) => {
+    if (!activeMembershipRaw?.teamId) return;
+    setSaving(true);
+    try {
+      await fnPromoteAdmin({ teamId: activeMembershipRaw.teamId, targetUid });
+    } catch (e) {
+      console.warn("promoteAdmin failed:", e);
+      Alert.alert("Error", prettyFnError(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDemoteAdmin = async (targetUid: string) => {
+    if (!activeMembershipRaw?.teamId) return;
+    setSaving(true);
+    try {
+      await fnDemoteAdmin({ teamId: activeMembershipRaw.teamId, targetUid });
+    } catch (e) {
+      console.warn("demoteAdmin failed:", e);
+      Alert.alert("Error", prettyFnError(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleTransferOwnership = async (newOwnerUid: string, newOwnerName: string) => {
+    if (!activeMembershipRaw?.teamId) return;
+
+    Alert.alert(
+      "Transfer ownership?",
+      `Make ${newOwnerName} the new owner?\n\nYou will become an admin.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Transfer",
+          style: "destructive",
+          onPress: async () => {
+            setSaving(true);
+            try {
+              await fnTransferOwnership({
+                teamId: activeMembershipRaw.teamId,
+                newOwnerUid,
+              });
+            } catch (e) {
+              console.warn("transferOwnership failed:", e);
+              Alert.alert("Error", prettyFnError(e));
+            } finally {
+              setSaving(false);
+            }
+          },
+        },
+      ]
+    );
   };
 
   const header = (
@@ -770,10 +839,7 @@ export default function TeamsScreen() {
           {/* Admin: pending requests */}
           {activeMembership && isAdmin && pendingRequests.length > 0 && (
             <View style={styles.section}>
-              <SectionTitle
-                title="Pending requests"
-                subtitle="Approve players to join your team."
-              />
+              <SectionTitle title="Pending requests" subtitle="Approve players to join your team." />
 
               <GlassCard>
                 {pendingRequests.map((r, idx) => {
@@ -813,18 +879,79 @@ export default function TeamsScreen() {
           {/* Members list */}
           {activeMembership && members.length > 0 && (
             <View style={styles.section}>
-              <SectionTitle
-                title="Members"
-                subtitle="Active players in your team."
-              />
+              <SectionTitle title="Members" subtitle="Active players in your team." />
 
               <GlassCard>
                 {members.map((m, idx) => {
                   const isMe = m.userId === user.uid;
-                  const canKick = isAdmin && !isMe && m.role !== "owner";
+
+                  // ✅ Kick rules:
+                  // - admin can remove members only
+                  // - owner can remove members + admins
+                  // - nobody can remove owner
+                  const canKick =
+                    isAdmin &&
+                    !isMe &&
+                    m.role !== "owner" &&
+                    (m.role === "member" || (isOwner && m.role === "admin"));
+
+                  // ✅ Role management: owner-only
+                  const canPromote = isOwner && !isMe && m.role === "member";
+                  const canDemote = isOwner && !isMe && m.role === "admin";
+                  const canTransfer = isOwner && !isMe && m.role !== "owner";
 
                   const name = String(m.userDisplayName ?? m.userEmail ?? m.userId);
                   const sub = `${m.role}${isMe ? " • you" : ""}`;
+
+                  const rightActions: React.ReactNode[] = [];
+
+                  if (canPromote) {
+                    rightActions.push(
+                      <SmallButton
+                        key="promote"
+                        title="Make admin"
+                        onPress={() => handlePromoteAdmin(m.userId)}
+                        disabled={saving}
+                        variant="secondary"
+                      />
+                    );
+                  }
+
+                  if (canDemote) {
+                    rightActions.push(
+                      <SmallButton
+                        key="demote"
+                        title="Remove admin"
+                        onPress={() => handleDemoteAdmin(m.userId)}
+                        disabled={saving}
+                        variant="secondary"
+                      />
+                    );
+                  }
+
+                  if (canTransfer) {
+                    rightActions.push(
+                      <SmallButton
+                        key="transfer"
+                        title="Make owner"
+                        onPress={() => handleTransferOwnership(m.userId, name)}
+                        disabled={saving}
+                        variant="danger"
+                      />
+                    );
+                  }
+
+                  if (canKick) {
+                    rightActions.push(
+                      <SmallButton
+                        key="kick"
+                        title="Remove"
+                        onPress={() => handleKick(m.userId)}
+                        disabled={saving}
+                        variant="danger"
+                      />
+                    );
+                  }
 
                   return (
                     <View key={m.id}>
@@ -832,13 +959,17 @@ export default function TeamsScreen() {
                         name={name}
                         subtitle={sub}
                         right={
-                          canKick ? (
-                            <SmallButton
-                              title="Remove"
-                              onPress={() => handleKick(m.userId)}
-                              disabled={saving}
-                              variant="danger"
-                            />
+                          rightActions.length ? (
+                            <View
+                              style={{
+                                flexDirection: "row",
+                                gap: 8,
+                                flexWrap: "wrap",
+                                justifyContent: "flex-end",
+                              }}
+                            >
+                              {rightActions}
+                            </View>
                           ) : null
                         }
                       />
@@ -853,10 +984,7 @@ export default function TeamsScreen() {
           {/* Join (only if not active/pending) */}
           {!activeMembershipRaw && !pendingMembership && (
             <View style={styles.section}>
-              <SectionTitle
-                title="Join a team"
-                subtitle="Enter an invite code to request access."
-              />
+              <SectionTitle title="Join a team" subtitle="Enter an invite code to request access." />
 
               <GlassCard>
                 <InputRow
@@ -886,10 +1014,7 @@ export default function TeamsScreen() {
           {/* Create (only if not active/pending) */}
           {!activeMembershipRaw && !pendingMembership && (
             <View style={styles.section}>
-              <SectionTitle
-                title="Create a team"
-                subtitle="Make a new squad and share the invite code."
-              />
+              <SectionTitle title="Create a team" subtitle="Make a new squad and share the invite code." />
 
               <GlassCard>
                 <InputRow
