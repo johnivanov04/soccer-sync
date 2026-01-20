@@ -472,49 +472,63 @@ export const leaveTeam = onCall(async (req) => {
 });
 
 export const kickMember = onCall(async (req) => {
-  const uid = await requireAuth(req);
+  try {
+    const uid = await requireAuth(req);
 
-  const teamId = normalizeCode(req.data?.teamId);
-  const userId = String(req.data?.userId ?? "").trim();
-  if (!teamId || !userId) throw new HttpsError("invalid-argument", "teamId and userId required.");
-  if (userId === uid) throw new HttpsError("invalid-argument", "You can’t remove yourself.");
+    const teamId = normalizeCode(req.data?.teamId);
+    const userId = String(req.data?.userId ?? "").trim();
+    if (!teamId || !userId) throw new HttpsError("invalid-argument", "teamId and userId required.");
+    if (userId === uid) throw new HttpsError("invalid-argument", "You can’t remove yourself.");
 
-  const me = await requireAdminOrOwner(teamId, uid);
+    const me = await requireAdminOrOwner(teamId, uid);
 
-  const targetMemRef = db.collection("memberships").doc(membershipDocId(teamId, userId));
-  const targetMemSnap = await targetMemRef.get();
-  if (!targetMemSnap.exists) return { ok: true };
+    const targetMemRef = db.collection("memberships").doc(membershipDocId(teamId, userId));
+    const targetMemSnap = await targetMemRef.get();
+    if (!targetMemSnap.exists) return { ok: true };
 
-  const targetMem = targetMemSnap.data() as any;
+    const targetMem = targetMemSnap.data() as any;
 
-  if (targetMem.role === "owner") throw new HttpsError("failed-precondition", "Can’t remove the owner.");
+    if (targetMem.role === "owner") throw new HttpsError("failed-precondition", "Can’t remove the owner.");
 
-  // ✅ NEW: admins cannot remove admins (owner can)
-  if (me.role === "admin" && targetMem.role === "admin") {
-    throw new HttpsError("permission-denied", "Only the owner can remove an admin.");
-  }
+    // ✅ admins cannot remove admins (owner can)
+    if (me.role === "admin" && targetMem.role === "admin") {
+      throw new HttpsError("permission-denied", "Only the owner can remove an admin.");
+    }
 
-  const targetUserRef = db.collection("users").doc(userId);
+    const targetUserRef = db.collection("users").doc(userId);
 
-  await db.runTransaction(async (tx) => {
-    tx.set(targetMemRef, { status: "removed", updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+    await db.runTransaction(async (tx) => {
+      // ✅ FIX: ALL READS FIRST
+      const u = await tx.get(targetUserRef);
+      const currentTeamId = u.exists ? String((u.data() as any)?.teamId ?? "") : "";
 
-    const u = await tx.get(targetUserRef);
-    const currentTeamId = u.exists ? String((u.data() as any)?.teamId ?? "") : "";
-    if (currentTeamId === teamId) {
+      // ✅ THEN WRITES
       tx.set(
-        targetUserRef,
-        {
-          teamId: FieldValue.delete(),
-          teamName: FieldValue.delete(),
-          updatedAt: FieldValue.serverTimestamp(),
-        },
+        targetMemRef,
+        { status: "removed", updatedAt: FieldValue.serverTimestamp() },
         { merge: true }
       );
-    }
-  });
 
-  return { ok: true };
+      if (currentTeamId === teamId) {
+        tx.set(
+          targetUserRef,
+          {
+            teamId: FieldValue.delete(),
+            teamName: FieldValue.delete(),
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+      }
+    });
+
+    return { ok: true };
+  } catch (err: any) {
+    console.error("kickMember crashed:", err);
+    // Re-throw Firebase callable errors
+    if (err?.code) throw err;
+    throw new HttpsError("internal", err?.message ? String(err.message) : "kickMember internal error");
+  }
 });
 
 export const rotateInviteCode = onCall(async (req) => {
@@ -556,10 +570,7 @@ export const promoteAdmin = onCall(async (req) => {
   }
   if (target.data.role === "admin") return { ok: true };
 
-  await target.ref.set(
-    { role: "admin", updatedAt: FieldValue.serverTimestamp() },
-    { merge: true }
-  );
+  await target.ref.set({ role: "admin", updatedAt: FieldValue.serverTimestamp() }, { merge: true });
 
   return { ok: true };
 });
@@ -583,10 +594,7 @@ export const demoteAdmin = onCall(async (req) => {
   }
   if (target.data.role !== "admin") return { ok: true };
 
-  await target.ref.set(
-    { role: "member", updatedAt: FieldValue.serverTimestamp() },
-    { merge: true }
-  );
+  await target.ref.set({ role: "member", updatedAt: FieldValue.serverTimestamp() }, { merge: true });
 
   return { ok: true };
 });
