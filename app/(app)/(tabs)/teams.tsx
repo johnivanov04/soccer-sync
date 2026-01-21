@@ -1,4 +1,5 @@
 // app/(app)/(tabs)/teams.tsx
+import { useRouter } from "expo-router";
 import {
   collection,
   doc,
@@ -268,6 +269,7 @@ function PersonRow({
 //cheating
 
 export default function TeamsScreen() {
+  const router = useRouter();
   const { user } = useAuth();
 
   const [loading, setLoading] = useState(true);
@@ -304,6 +306,17 @@ export default function TeamsScreen() {
   const myRole = activeMembership?.role ?? null;
   const isAdmin = isAdminRole(myRole ?? undefined);
   const isOwner = myRole === "owner";
+
+  // ✅ NAV: open team settings screen
+  const openTeamSettings = () => {
+    const teamId = activeMembershipRaw?.teamId;
+    if (!teamId) return;
+
+    router.push({
+      pathname: "/(app)/team/[teamId]/settings",
+      params: { teamId },
+    });
+  };
 
   // Callables
   const fnCreateTeam = useMemo(() => httpsCallable(functions, "createTeam"), []);
@@ -787,15 +800,31 @@ export default function TeamsScreen() {
                 Invite code <Text style={styles.cardTextStrong}>{inviteCode || "(none)"}</Text>
               </Text>
 
+              {!!team.homeCity && (
+                <Text style={[styles.cardText, { marginTop: 6 }]}>
+                  Home city <Text style={styles.cardTextStrong}>{team.homeCity}</Text>
+                </Text>
+              )}
+
+              {typeof team.defaultMaxPlayers === "number" && Number.isFinite(team.defaultMaxPlayers) && (
+                <Text style={[styles.cardText, { marginTop: 6 }]}>
+                  Default max players{" "}
+                  <Text style={styles.cardTextStrong}>{String(team.defaultMaxPlayers)}</Text>
+                </Text>
+              )}
+
               <View style={{ height: 14 }} />
 
-              <ActionButton
-                title={saving ? "Working…" : "Leave team"}
-                onPress={handleLeaveTeam}
-                disabled={saving}
-                variant="danger"
-                rightSlot={saving ? <ActivityIndicator /> : null}
-              />
+              {/* ✅ Access Team Settings (admin/owner only) */}
+              {isAdmin && (
+                <ActionButton
+                  title={saving ? "Working…" : "Team settings"}
+                  onPress={openTeamSettings}
+                  disabled={saving}
+                  variant="secondary"
+                  rightSlot={saving ? <ActivityIndicator /> : <Text style={styles.btnEmoji}>⚙️</Text>}
+                />
+              )}
 
               {isAdmin && (
                 <View style={{ marginTop: 10 }}>
@@ -804,10 +833,20 @@ export default function TeamsScreen() {
                     onPress={handleRotateInvite}
                     disabled={saving}
                     variant="secondary"
-                    rightSlot={saving ? <ActivityIndicator /> : null}
+                    rightSlot={saving ? <ActivityIndicator /> : <Text style={styles.btnEmoji}>🔁</Text>}
                   />
                 </View>
               )}
+
+              <View style={{ marginTop: 10 }}>
+                <ActionButton
+                  title={saving ? "Working…" : "Leave team"}
+                  onPress={handleLeaveTeam}
+                  disabled={saving}
+                  variant="danger"
+                  rightSlot={saving ? <ActivityIndicator /> : <Text style={styles.btnEmojiDanger}>🚪</Text>}
+                />
+              </View>
             </GlassCard>
           ) : pendingMembership ? (
             <GlassCard>
@@ -1007,7 +1046,10 @@ export default function TeamsScreen() {
           {/* Create (only if not active/pending) */}
           {!activeMembershipRaw && !pendingMembership && (
             <View style={styles.section}>
-              <SectionTitle title="Create a team" subtitle="Make a new squad and share the invite code." />
+              <SectionTitle
+                title="Create a team"
+                subtitle="Make a new squad and share the invite code."
+              />
 
               <GlassCard>
                 <InputRow
@@ -1224,6 +1266,9 @@ const styles = StyleSheet.create({
   },
   btnTextPrimary: { color: "#04130f" },
   btnTextSecondary: { color: "white" },
+
+  btnEmoji: { fontSize: 16, opacity: 0.95 },
+  btnEmojiDanger: { fontSize: 16, opacity: 0.95 },
 
   smallBtn: {
     height: 34,
