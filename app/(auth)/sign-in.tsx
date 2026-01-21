@@ -13,9 +13,7 @@ import {
   View,
 } from "react-native";
 import { useAuth } from "../../src/context/AuthContext";
-import { auth } from "../../src/firebaseConfig";
 
-// ✅ put your file here: assets/images/pickupsoccerlogo.png
 const LOGO = require("../../assets/images/pickupsoccerlogo.png");
 
 export default function SignInScreen() {
@@ -36,16 +34,14 @@ export default function SignInScreen() {
       setError("");
       setLoading(true);
 
-      await signIn(email.trim(), password);
+      const u = await signIn(email.trim(), password);
 
-      // ✅ Route unverified users to verify screen
-      const u = auth.currentUser;
-      if (u && !u.emailVerified) {
+      // ✅ Route correctly based on verification (prevents flicker)
+      if (!u.emailVerified) {
         router.replace("/(auth)/verify-email");
-        return;
+      } else {
+        router.replace("/(app)/(tabs)/matches");
       }
-
-      router.replace("/(app)/(tabs)/matches");
     } catch (e: any) {
       console.error(e);
       setError(e?.message || "Could not sign in");
@@ -108,7 +104,6 @@ export default function SignInScreen() {
             />
           </View>
 
-          {/* ✅ Forgot password goes to its own page */}
           <Pressable
             onPress={() => router.push("/(auth)/forgot-password")}
             disabled={loading}

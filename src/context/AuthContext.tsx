@@ -19,11 +19,11 @@ import { registerForPushNotificationsAsync } from "../utils/pushNotifications";
 interface AuthContextValue {
   user: User | null;
   initializing: boolean;
-  signIn: (email: string, password: string) => Promise<void>;
-  signUp: (email: string, password: string, displayName?: string) => Promise<void>;
+  signIn: (email: string, password: string) => Promise<User>;
+  signUp: (email: string, password: string, displayName?: string) => Promise<User>;
   signOut: () => Promise<void>;
   sendVerificationEmail: () => Promise<void>;
-  refreshUser: () => Promise<void>;
+  refreshUser: () => Promise<User | null>;
   resetPassword: (email: string) => Promise<void>;
 }
 
@@ -107,7 +107,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   }, []);
 
   const signIn = async (email: string, password: string) => {
-    await signInWithEmailAndPassword(auth, email, password);
+    const cred = await signInWithEmailAndPassword(auth, email, password);
+    return cred.user;
   };
 
   const signUp = async (email: string, password: string, displayName?: string) => {
@@ -151,6 +152,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       },
       { merge: true }
     );
+
+    return fbUser;
   };
 
   const signOut = async () => {
@@ -167,9 +170,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     const u = auth.currentUser;
     if (!u) throw new Error("Not signed in.");
     await reload(u);
-
-    // ✅ Update state so UI reflects verification status changes
     setUser(auth.currentUser);
+    return auth.currentUser;
   };
 
   const resetPasswordFn = async (email: string) => {

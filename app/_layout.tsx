@@ -42,7 +42,7 @@ function RootNavigation() {
   // If user taps notification / opens deep link while logged out / not ready
   const pendingRouteRef = useRef<PendingRoute>(null);
 
-  // Track whether we already processed a tap this launch
+  // Track whether we already processed a tap/link this launch
   const handledAnyThisLaunchRef = useRef(false);
 
   const buildTargetFromNotification = useCallback(
@@ -89,16 +89,9 @@ function RootNavigation() {
       const goChat = openChatExplicit || looksLikeChat;
 
       if (goChat) {
-        return {
-          pathname: "/(app)/match/chat/[matchId]",
-          params: { matchId },
-        };
+        return { pathname: "/(app)/match/chat/[matchId]", params: { matchId } };
       }
-
-      return {
-        pathname: "/(app)/match/[matchId]",
-        params: { matchId },
-      };
+      return { pathname: "/(app)/match/[matchId]", params: { matchId } };
     },
     []
   );
@@ -124,12 +117,8 @@ function RootNavigation() {
       // ✅ Style A: soccersyncmobile://match/<id>       (host="match", path="<id>")
       if (host === "match") {
         if (parts[0] && parts[0] !== "chat") {
-          return {
-            pathname: "/(app)/match/[matchId]",
-            params: { matchId: String(parts[0]) },
-          };
+          return { pathname: "/(app)/match/[matchId]", params: { matchId: String(parts[0]) } };
         }
-
         if (parts[0] === "chat" && parts[1]) {
           return {
             pathname: "/(app)/match/chat/[matchId]",
@@ -146,27 +135,17 @@ function RootNavigation() {
         const p2 = parts[idx + 2];
 
         if (p1 && p1 !== "chat") {
-          return {
-            pathname: "/(app)/match/[matchId]",
-            params: { matchId: String(p1) },
-          };
+          return { pathname: "/(app)/match/[matchId]", params: { matchId: String(p1) } };
         }
-
         if (p1 === "chat" && p2) {
-          return {
-            pathname: "/(app)/match/chat/[matchId]",
-            params: { matchId: String(p2) },
-          };
+          return { pathname: "/(app)/match/chat/[matchId]", params: { matchId: String(p2) } };
         }
       }
 
       // ✅ also support ?matchId=<id>
       const qMatchId = (parsed as any)?.queryParams?.matchId;
       if (qMatchId) {
-        return {
-          pathname: "/(app)/match/[matchId]",
-          params: { matchId: String(qMatchId) },
-        };
+        return { pathname: "/(app)/match/[matchId]", params: { matchId: String(qMatchId) } };
       }
 
       return null;
@@ -183,7 +162,6 @@ function RootNavigation() {
       if (!target) return;
 
       if (isColdStart) {
-        // Seed base so back goes to Matches instead of exiting
         router.replace("/(app)/(tabs)/matches");
         requestAnimationFrame(() => {
           router.push(target);
@@ -191,7 +169,6 @@ function RootNavigation() {
         return;
       }
 
-      // Warm navigation: keep existing stack
       router.push(target);
     },
     [router, isColdStart]
@@ -201,7 +178,6 @@ function RootNavigation() {
     async (response: Notifications.NotificationResponse) => {
       const notifId = response?.notification?.request?.identifier ?? null;
 
-      // de-dupe per notification id
       if (notifId && lastHandledNotificationIdRef.current === notifId) return;
       if (notifId) lastHandledNotificationIdRef.current = notifId;
 
@@ -211,7 +187,6 @@ function RootNavigation() {
       handledAnyThisLaunchRef.current = true;
       setBootstrapDone(true);
 
-      // Store until ready/auth'd
       if (!navReady || initializing || !user) {
         pendingRouteRef.current = target;
         return;
@@ -219,7 +194,7 @@ function RootNavigation() {
 
       navigateToTarget(target);
 
-      // ✅ Prevent stale "last response" from hijacking the next cold start (if supported)
+      // ✅ prevent stale "last response" from hijacking next cold start (if supported)
       try {
         const anyNotif = Notifications as any;
         if (typeof anyNotif.clearLastNotificationResponseAsync === "function") {
@@ -235,15 +210,12 @@ function RootNavigation() {
   const tryHandleLastResponse = useCallback(async () => {
     try {
       const last = await Notifications.getLastNotificationResponseAsync();
-      if (last) {
-        await handleNotificationResponse(last);
-      }
+      if (last) await handleNotificationResponse(last);
     } catch (e) {
       console.warn("getLastNotificationResponseAsync failed", e);
     }
   }, [handleNotificationResponse]);
 
-  // ✅ Handle deep links (initial + runtime)
   const handleIncomingUrl = useCallback(
     (url: string) => {
       const target = buildTargetFromUrl(url);
@@ -262,6 +234,7 @@ function RootNavigation() {
     [buildTargetFromUrl, navReady, initializing, user, navigateToTarget]
   );
 
+  // ✅ Handle deep links (initial + runtime)
   useEffect(() => {
     let sub: any;
 
@@ -285,18 +258,18 @@ function RootNavigation() {
     };
   }, [handleIncomingUrl]);
 
-  // Listen for notification taps + cold start recovery
+  // ✅ Notification taps (ONLY here; notificationsSetup.ts should NOT navigate)
   useEffect(() => {
     const sub = Notifications.addNotificationResponseReceivedListener((resp) => {
       handleNotificationResponse(resp);
     });
 
-    // ✅ Cold-start recovery:
+    // Cold-start recovery attempts
     tryHandleLastResponse();
     const t1 = setTimeout(() => tryHandleLastResponse(), 400);
     const t2 = setTimeout(() => tryHandleLastResponse(), 1200);
 
-    // ✅ After our bootstrap window, allow default auth routing if nothing was handled
+    // After bootstrap window, allow default auth routing
     const tDone = setTimeout(() => setBootstrapDone(true), 1400);
 
     return () => {
@@ -307,7 +280,7 @@ function RootNavigation() {
     };
   }, [handleNotificationResponse, tryHandleLastResponse]);
 
-  // ✅ Also re-check once navigation becomes ready (helps some Android timing cases)
+  // Also re-check once navigation becomes ready
   useEffect(() => {
     if (!navReady) return;
     if (!handledAnyThisLaunchRef.current) {
@@ -319,18 +292,17 @@ function RootNavigation() {
   useEffect(() => {
     if (!navReady || initializing) return;
 
-    // ✅ On cold start, wait until our bootstrap window has finished
     if (isColdStart && !bootstrapDone) return;
 
-    const inAuthGroup = segments[0] === "(auth)";
-    const inVerifyEmail = segments.includes("verify-email");
+    const inAuthGroup = segments?.[0] === "(auth)";
+    const inVerifyEmail = segments?.includes("verify-email");
 
     if (!user) {
       if (!inAuthGroup) router.replace("/(auth)/sign-in");
       return;
     }
 
-    // ✅ Email verification gate (Option 1)
+    // ✅ Email verification gate
     if (!user.emailVerified) {
       if (!inAuthGroup || !inVerifyEmail) {
         router.replace("/(auth)/verify-email");
@@ -341,7 +313,6 @@ function RootNavigation() {
     if (pendingRouteRef.current) {
       const target = pendingRouteRef.current;
       pendingRouteRef.current = null;
-
       navigateToTarget(target);
       return;
     }

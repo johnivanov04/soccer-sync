@@ -14,7 +14,6 @@ import {
 } from "react-native";
 import { useAuth } from "../../src/context/AuthContext";
 
-// ✅ same logo as sign-in
 const LOGO = require("../../assets/images/pickupsoccerlogo.png");
 
 export default function SignUpScreen() {
@@ -43,24 +42,19 @@ export default function SignUpScreen() {
       const name = displayName.trim();
       const mail = email.trim();
 
-      if (!name) {
-        setError("Please enter a display name.");
-        return;
-      }
-      if (!mail) {
-        setError("Please enter an email.");
-        return;
-      }
-      if (password.length < 6) {
-        setError("Password must be at least 6 characters.");
-        return;
-      }
+      if (!name) return setError("Please enter a display name.");
+      if (!mail) return setError("Please enter an email.");
+      if (password.length < 6) return setError("Password must be at least 6 characters.");
 
       setLoading(true);
-      await signUp(mail, password, name);
+      const u = await signUp(mail, password, name);
 
-      // ✅ New accounts are unverified → go verify
-      router.replace("/(auth)/verify-email");
+      // ✅ new accounts should verify
+      if (!u.emailVerified) {
+        router.replace("/(auth)/verify-email");
+      } else {
+        router.replace("/(app)/(tabs)/matches");
+      }
     } catch (e: any) {
       console.error(e);
       setError(e?.message || "Could not sign up");
@@ -71,7 +65,6 @@ export default function SignUpScreen() {
 
   return (
     <View style={styles.screen}>
-      {/* Clean background (matches sign-in) */}
       <View style={styles.bg} />
 
       <KeyboardAvoidingView
@@ -167,39 +160,16 @@ export default function SignUpScreen() {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: "#052b22" },
+  bg: { ...StyleSheet.absoluteFillObject, backgroundColor: "#052b22" },
 
-  bg: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "#052b22",
-  },
+  container: { flex: 1, paddingHorizontal: 18, justifyContent: "center" },
 
-  container: {
-    flex: 1,
-    paddingHorizontal: 18,
-    justifyContent: "center",
-  },
+  hero: { alignItems: "center", marginBottom: 16 },
 
-  hero: {
-    alignItems: "center",
-    marginBottom: 16,
-  },
+  logoWrap: { width: 180, height: 120, marginBottom: 10 },
+  logo: { width: "100%", height: "100%" },
 
-  logoWrap: {
-    width: 180,
-    height: 120,
-    marginBottom: 10,
-  },
-  logo: {
-    width: "100%",
-    height: "100%",
-  },
-
-  title: {
-    fontSize: 34,
-    fontWeight: "900",
-    color: "white",
-    letterSpacing: 0.2,
-  },
+  title: { fontSize: 34, fontWeight: "900", color: "white", letterSpacing: 0.2 },
   subtitle: {
     marginTop: 6,
     fontSize: 15,
@@ -235,12 +205,7 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.10)",
   },
   icon: { fontSize: 18, marginRight: 10, opacity: 0.85 },
-  input: {
-    flex: 1,
-    color: "white",
-    fontSize: 16,
-    fontWeight: "700",
-  },
+  input: { flex: 1, color: "white", fontSize: 16, fontWeight: "700" },
 
   primaryBtn: {
     marginTop: 18,
@@ -250,21 +215,10 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: "#1b7f5a",
   },
-  primaryBtnDisabled: {
-    opacity: 0.55,
-  },
-  primaryBtnText: {
-    color: "#04130f",
-    fontSize: 18,
-    fontWeight: "900",
-  },
+  primaryBtnDisabled: { opacity: 0.55 },
+  primaryBtnText: { color: "#04130f", fontSize: 18, fontWeight: "900" },
 
-  error: {
-    color: "#ffb4b4",
-    marginBottom: 10,
-    fontWeight: "800",
-    textAlign: "center",
-  },
+  error: { color: "#ffb4b4", marginBottom: 10, fontWeight: "800", textAlign: "center" },
 
   link: {
     marginTop: 16,
