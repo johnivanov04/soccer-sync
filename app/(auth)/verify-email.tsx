@@ -3,15 +3,16 @@ import { Image } from "expo-image";
 import { useRouter } from "expo-router";
 import React, { useMemo, useState } from "react";
 import {
-    ActivityIndicator,
-    KeyboardAvoidingView,
-    Platform,
-    Pressable,
-    StyleSheet,
-    Text,
-    View,
+  ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
 } from "react-native";
 import { useAuth } from "../../src/context/AuthContext";
+import { auth } from "../../src/firebaseConfig";
 
 const LOGO = require("../../assets/images/pickupsoccerlogo.png");
 
@@ -26,7 +27,11 @@ export default function VerifyEmailScreen() {
   const email = user?.email ?? "";
   const verified = !!user?.emailVerified;
 
-  const canResend = useMemo(() => !!user && !sending && !checking, [user, sending, checking]);
+  // ✅ Don't offer resend if already verified
+  const canResend = useMemo(
+    () => !!user && !verified && !sending && !checking,
+    [user, verified, sending, checking]
+  );
 
   const handleResend = async () => {
     try {
@@ -45,13 +50,19 @@ export default function VerifyEmailScreen() {
     try {
       setError("");
       setChecking(true);
+
       await refreshUser();
 
-      // If verified now, go to app.
-      // (Your app/_layout gate will also handle this, but this makes it immediate.)
-      if (user?.emailVerified) {
+      // ✅ FIX: check the fresh auth.currentUser, not stale `user` from closure
+      const fresh = auth.currentUser;
+
+      if (fresh?.emailVerified) {
         router.replace("/(app)/(tabs)/matches");
+        return;
       }
+
+      // Optional friendly nudge (no hard error)
+      setError("Still not verified yet — open the email and tap the verification link.");
     } catch (e: any) {
       console.error(e);
       setError(e?.message || "Could not refresh status.");

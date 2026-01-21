@@ -167,6 +167,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     const u = auth.currentUser;
     if (!u) throw new Error("Not signed in.");
     await reload(u);
+
+    // ✅ Update state so UI reflects verification status changes
     setUser(auth.currentUser);
   };
 

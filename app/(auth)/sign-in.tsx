@@ -13,6 +13,7 @@ import {
   View,
 } from "react-native";
 import { useAuth } from "../../src/context/AuthContext";
+import { auth } from "../../src/firebaseConfig";
 
 // ✅ put your file here: assets/images/pickupsoccerlogo.png
 const LOGO = require("../../assets/images/pickupsoccerlogo.png");
@@ -34,7 +35,16 @@ export default function SignInScreen() {
     try {
       setError("");
       setLoading(true);
+
       await signIn(email.trim(), password);
+
+      // ✅ Route unverified users to verify screen
+      const u = auth.currentUser;
+      if (u && !u.emailVerified) {
+        router.replace("/(auth)/verify-email");
+        return;
+      }
+
       router.replace("/(app)/(tabs)/matches");
     } catch (e: any) {
       console.error(e);
@@ -102,7 +112,10 @@ export default function SignInScreen() {
           <Pressable
             onPress={() => router.push("/(auth)/forgot-password")}
             disabled={loading}
-            style={({ pressed }) => [{ marginTop: 10, alignSelf: "flex-end" }, pressed && { opacity: 0.85 }]}
+            style={({ pressed }) => [
+              { marginTop: 10, alignSelf: "flex-end" },
+              pressed && { opacity: 0.85 },
+            ]}
           >
             <Text style={styles.forgotLink}>Forgot password?</Text>
           </Pressable>
@@ -201,7 +214,12 @@ const styles = StyleSheet.create({
   primaryBtnDisabled: { opacity: 0.55 },
   primaryBtnText: { color: "#04130f", fontSize: 18, fontWeight: "900" },
 
-  error: { color: "#ffb4b4", marginBottom: 10, fontWeight: "800", textAlign: "center" },
+  error: {
+    color: "#ffb4b4",
+    marginBottom: 10,
+    fontWeight: "800",
+    textAlign: "center",
+  },
 
   link: {
     marginTop: 16,

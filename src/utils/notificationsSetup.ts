@@ -45,7 +45,7 @@ export function initNotifications() {
 
   Notifications.setNotificationHandler({
     handleNotification: async () => ({
-      shouldShowAlert: true,
+      // ✅ Use banner/list (avoid deprecated shouldShowAlert)
       shouldShowBanner: true,
       shouldShowList: true,
       shouldPlaySound: true,

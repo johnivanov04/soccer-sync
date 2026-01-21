@@ -58,7 +58,9 @@ export default function SignUpScreen() {
 
       setLoading(true);
       await signUp(mail, password, name);
-      router.replace("/(app)/(tabs)/matches");
+
+      // ✅ New accounts are unverified → go verify
+      router.replace("/(auth)/verify-email");
     } catch (e: any) {
       console.error(e);
       setError(e?.message || "Could not sign up");
