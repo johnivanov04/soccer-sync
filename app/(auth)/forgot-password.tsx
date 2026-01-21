@@ -1,20 +1,37 @@
 // app/(auth)/forgot-password.tsx
 import { Image } from "expo-image";
 import { useRouter } from "expo-router";
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
-    ActivityIndicator,
-    KeyboardAvoidingView,
-    Platform,
-    Pressable,
-    StyleSheet,
-    Text,
-    TextInput,
-    View,
+  ActivityIndicator,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
 } from "react-native";
 import { useAuth } from "../../src/context/AuthContext";
 
 const LOGO = require("../../assets/images/pickupsoccerlogo.png");
+
+function friendlyResetError(e: any) {
+  const code = String(e?.code ?? "");
+  const msg = String(e?.message ?? "");
+
+  // Firebase common codes:
+  if (code.includes("auth/invalid-email")) return "That email address looks invalid.";
+  if (code.includes("auth/too-many-requests"))
+    return "Too many attempts. Please wait a bit and try again.";
+
+  // Security-friendly: treat “user not found” as success
+  if (code.includes("auth/user-not-found")) return null;
+
+  // fallback
+  return msg || "Could not send reset email.";
+}
 
 export default function ForgotPasswordScreen() {
   const router = useRouter();
@@ -30,19 +47,36 @@ export default function ForgotPasswordScreen() {
     return email.trim().length > 0 && !loading;
   }, [email, loading]);
 
+  // ✅ if they edit email after success, hide the success banner
+  useEffect(() => {
+    if (sent) setSent(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [email]);
+
   const handleSend = async () => {
+    const mail = email.trim();
+    if (!mail || loading) return;
+
     try {
+      Keyboard.dismiss();
       setError("");
       setSent(false);
       setLoading(true);
 
-      await resetPassword(email.trim());
+      await resetPassword(mail);
 
-      // Security-friendly UX: show success regardless of whether email exists
+      // ✅ security-friendly UX: show success regardless
       setSent(true);
     } catch (e: any) {
       console.error(e);
-      setError(e?.message || "Could not send reset email.");
+
+      const friendly = friendlyResetError(e);
+      if (friendly == null) {
+        // ✅ treat user-not-found as success to avoid account enumeration
+        setSent(true);
+      } else {
+        setError(friendly);
+      }
     } finally {
       setLoading(false);
     }
@@ -69,7 +103,8 @@ export default function ForgotPasswordScreen() {
           {!!error && <Text style={styles.error}>{error}</Text>}
           {sent && (
             <Text style={styles.success}>
-              If an account exists for that email, we sent a reset link. Check your inbox (and spam).
+              If an account exists for that email, we sent a reset link. Check your inbox (and
+              spam).
             </Text>
           )}
 
@@ -83,7 +118,10 @@ export default function ForgotPasswordScreen() {
               autoCapitalize="none"
               keyboardType="email-address"
               value={email}
-              onChangeText={setEmail}
+              onChangeText={(v) => {
+                setError("");
+                setEmail(v);
+              }}
               editable={!loading}
               returnKeyType="send"
               onSubmitEditing={() => {
