@@ -330,6 +330,8 @@ export const createTeam = onCall(async (req) => {
   return { teamId: code, teamName: name, inviteCode };
 });
 
+
+
 /**
  * joinTeamWithCode({ code })
  */
@@ -550,6 +552,59 @@ export const rotateInviteCode = onCall(async (req) => {
 
   return { inviteCode };
 });
+
+export const deleteTeam = onCall(async (req) => {
+  const uid = await requireAuth(req);
+
+  const teamId = normalizeCode(req.data?.teamId);
+  if (!teamId) throw new HttpsError("invalid-argument", "teamId required.");
+
+  await requireOwner(teamId, uid);
+
+  const teamRef = db.collection("teams").doc(teamId);
+
+  // Soft-delete team + disable invites
+  await teamRef.set(
+    {
+      deleted: true,
+      deletedAt: FieldValue.serverTimestamp(),
+      deletedBy: uid,
+      inviteCode: null,
+      updatedAt: FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  );
+
+  // Clear memberships (source of truth). Your onMembershipWriteSyncUser will clean users/{uid}.teamId safely.
+  const activeSnap = await db
+    .collection("memberships")
+    .where("teamId", "==", teamId)
+    .where("status", "==", "active")
+    .get();
+
+  const pendingSnap = await db
+    .collection("memberships")
+    .where("teamId", "==", teamId)
+    .where("status", "==", "pending")
+    .get();
+
+  const docs = [...activeSnap.docs, ...pendingSnap.docs];
+
+  for (const group of chunk(docs, 400)) {
+    const batch = db.batch();
+    for (const d of group) {
+      batch.set(
+        d.ref,
+        { status: "removed", updatedAt: FieldValue.serverTimestamp() },
+        { merge: true }
+      );
+    }
+    await batch.commit();
+  }
+
+  return { ok: true, removedMemberships: docs.length };
+});
+
 
 // ✅ NEW: Promote to admin (owner-only)
 export const promoteAdmin = onCall(async (req) => {

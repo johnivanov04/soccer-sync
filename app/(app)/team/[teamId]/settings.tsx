@@ -1,14 +1,13 @@
 // app/(app)/team/[teamId]/settings.tsx
 import { useLocalSearchParams, useRouter } from "expo-router";
 import {
-    deleteDoc,
     doc,
-    getDoc,
     onSnapshot,
     serverTimestamp,
     setDoc,
     type Unsubscribe,
 } from "firebase/firestore";
+import { httpsCallable } from "firebase/functions";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
     ActivityIndicator,
@@ -16,6 +15,7 @@ import {
     KeyboardAvoidingView,
     Platform,
     Pressable,
+    Share,
     StyleSheet,
     Text,
     TextInput,
@@ -24,8 +24,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { useAuth } from "../../../../src/context/AuthContext";
-import { db } from "../../../../src/firebaseConfig";
-
+import { db, functions } from "../../../../src/firebaseConfig";
 
 type TeamRole = "owner" | "admin" | "member" | "none";
 
@@ -34,16 +33,19 @@ type TeamDoc = {
   homeCity?: string;
   defaultMaxPlayers?: number;
 
-  // common ownership/admin patterns
   ownerId?: string;
-  ownerUid?: string;
   createdBy?: string;
-
-  adminUids?: string[];
-  admins?: string[];
 
   deleted?: boolean;
   inviteCode?: string | null;
+};
+
+type MembershipDoc = {
+  teamId: string;
+  teamName?: string;
+  userId: string;
+  role: "owner" | "admin" | "member";
+  status: "pending" | "active" | "removed" | "left";
 };
 
 function paramToString(v: any): string | null {
@@ -82,14 +84,19 @@ export default function TeamSettingsScreen() {
   const canEdit = role === "owner" || role === "admin";
   const isOwner = role === "owner";
 
-  // ---------- load team + compute role ----------
+  // Cloud Functions
+  const fnLeaveTeam = useMemo(() => httpsCallable(functions, "leaveTeam"), []);
+  const fnDeleteTeam = useMemo(() => httpsCallable(functions, "deleteTeam"), []);
+
+  // ---------- load team + membership(role) ----------
   useEffect(() => {
     let unsubTeam: Unsubscribe | null = null;
-    let unsubMember: Unsubscribe | null = null;
+    let unsubMembership: Unsubscribe | null = null;
 
     setError("");
+    setLoading(true);
 
-    if (!teamId) {
+    if (!teamId || !user?.uid) {
       setLoading(false);
       setTeam(null);
       setRole("none");
@@ -118,30 +125,6 @@ export default function TeamSettingsScreen() {
           setDefaultMaxPlayersText(String(data?.defaultMaxPlayers ?? 10));
           didInitFormRef.current = true;
         }
-
-        // compute role from team doc fields (owner/admin arrays)
-        const uid = user?.uid ?? "";
-        if (!uid) {
-          setRole("none");
-          return;
-        }
-
-        const ownerUid =
-          data?.ownerId ?? data?.ownerUid ?? data?.createdBy ?? null;
-
-        if (ownerUid && String(ownerUid) === uid) {
-          setRole("owner");
-          return;
-        }
-
-        const admins = (data?.adminUids ?? data?.admins ?? []) as any[];
-        if (Array.isArray(admins) && admins.map(String).includes(uid)) {
-          setRole((prev) => (prev === "owner" ? "owner" : "admin"));
-          return;
-        }
-
-        // otherwise role might come from membership doc below
-        setRole((prev) => (prev === "owner" || prev === "admin" ? prev : "member"));
       },
       (err) => {
         console.warn("team settings team onSnapshot error:", err);
@@ -150,36 +133,43 @@ export default function TeamSettingsScreen() {
       }
     );
 
-    // Membership doc (optional, but helps determine admin)
-    // Assumption: teams/{teamId}/members/{uid} has { role: "owner"|"admin"|"member" }
-    if (user?.uid) {
-      const memberRef = doc(db, "teams", teamId, "members", user.uid);
-      unsubMember = onSnapshot(
-        memberRef,
-        (snap) => {
-          if (!snap.exists()) {
-            // keep whatever role we already inferred
-            return;
-          }
-          const d = snap.data() as any;
-          const r = String(d?.role ?? "").toLowerCase();
-
-          if (r === "owner") setRole("owner");
-          else if (r === "admin") setRole((prev) => (prev === "owner" ? "owner" : "admin"));
-          else if (r === "member") setRole((prev) => (prev === "owner" || prev === "admin" ? prev : "member"));
-        },
-        () => {
-          // ignore membership read errors; team doc inference may still work
+    // ✅ Membership doc is the source of truth in your app:
+    // memberships/{teamId}_{uid}
+    const memRef = doc(db, "memberships", `${teamId}_${user.uid}`);
+    unsubMembership = onSnapshot(
+      memRef,
+      (snap) => {
+        if (!snap.exists()) {
+          setRole("none");
+          return;
         }
-      );
-    }
+        const m = snap.data() as any as MembershipDoc;
+
+        // Only active members should be here (rules block team reads otherwise),
+        // but keep it defensive:
+        if (m.status !== "active") {
+          setRole("none");
+          return;
+        }
+
+        const r = String(m.role ?? "").toLowerCase();
+        if (r === "owner") setRole("owner");
+        else if (r === "admin") setRole("admin");
+        else setRole("member");
+      },
+      (err) => {
+        // ignore membership read errors; team read will fail anyway if not active member
+        console.warn("membership onSnapshot error:", err);
+        setRole("none");
+      }
+    );
 
     return () => {
       try {
         unsubTeam?.();
       } catch {}
       try {
-        unsubMember?.();
+        unsubMembership?.();
       } catch {}
     };
   }, [teamId, user?.uid]);
@@ -202,7 +192,9 @@ export default function TeamSettingsScreen() {
 
     const { nm, maxPlayers } = normalized;
     if (!nm) return false;
-    if (!Number.isFinite(maxPlayers) || maxPlayers < 2 || maxPlayers > 50) return false;
+
+    // ✅ match your rules: 2–40
+    if (!Number.isFinite(maxPlayers) || maxPlayers < 2 || maxPlayers > 40) return false;
 
     return true;
   }, [teamId, user?.uid, team, canEdit, saving, normalized]);
@@ -217,8 +209,8 @@ export default function TeamSettingsScreen() {
     const { nm, city, maxPlayers } = normalized;
 
     if (!nm) return setError("Team name is required.");
-    if (!Number.isFinite(maxPlayers) || maxPlayers < 2 || maxPlayers > 50) {
-      return setError("Default max players must be between 2 and 50.");
+    if (!Number.isFinite(maxPlayers) || maxPlayers < 2 || maxPlayers > 40) {
+      return setError("Default max players must be between 2 and 40.");
     }
 
     try {
@@ -248,6 +240,19 @@ export default function TeamSettingsScreen() {
     }
   };
 
+  const handleShareInvite = async () => {
+    const code = String(team?.inviteCode ?? "").trim();
+    if (!code) {
+      Alert.alert("No invite code", "This team doesn’t currently have an invite code.");
+      return;
+    }
+    const teamName = team?.name ?? teamId ?? "team";
+    const msg = `Join my team "${teamName}" with invite code: ${code}`;
+    try {
+      await Share.share({ message: msg });
+    } catch {}
+  };
+
   // ---------- Danger zone ----------
   const handleLeaveTeam = async () => {
     if (!teamId || !user?.uid) return;
@@ -255,43 +260,32 @@ export default function TeamSettingsScreen() {
     if (isOwner) {
       Alert.alert(
         "Owner can’t leave",
-        "Owners can’t leave the team. Transfer ownership or delete the team instead."
+        "Owners can’t leave the team. Transfer ownership first (from Teams tab), or delete the team."
       );
       return;
     }
 
-    Alert.alert(
-      "Leave team?",
-      "You’ll lose access to team matches and chats.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Leave",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              setSaving(true);
-              setError("");
-
-              // Assumption: membership doc is teams/{teamId}/members/{uid}
-              const memberRef = doc(db, "teams", teamId, "members", user.uid);
-              const snap = await getDoc(memberRef);
-              if (snap.exists()) {
-                await deleteDoc(memberRef);
-              }
-
-              Alert.alert("Left team", "You’ve left the team.");
-              router.replace("/(app)/(tabs)/teams");
-            } catch (e: any) {
-              console.error(e);
-              setError(e?.message || "Could not leave the team. (Check rules + membership path.)");
-            } finally {
-              setSaving(false);
-            }
-          },
+    Alert.alert("Leave team?", "You’ll lose access to team matches/chats.", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Leave",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            setSaving(true);
+            setError("");
+            await fnLeaveTeam({});
+            Alert.alert("Left team", "You’ve left the team.");
+            router.replace("/(app)/(tabs)/teams");
+          } catch (e: any) {
+            console.error(e);
+            setError(e?.message || "Could not leave the team.");
+          } finally {
+            setSaving(false);
+          }
         },
-      ]
-    );
+      },
+    ]);
   };
 
   const handleDeleteTeam = async () => {
@@ -304,7 +298,7 @@ export default function TeamSettingsScreen() {
 
     Alert.alert(
       "Delete team?",
-      "This will disable the team and prevent new joins. (Recommended: soft delete.)",
+      "This will soft-delete the team (disables invites and clears memberships).",
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -314,22 +308,7 @@ export default function TeamSettingsScreen() {
             try {
               setSaving(true);
               setError("");
-
-              const teamRef = doc(db, "teams", teamId);
-
-              // Soft delete: hide team in UI + disable invites
-              await setDoc(
-                teamRef,
-                {
-                  deleted: true,
-                  deletedAt: serverTimestamp(),
-                  deletedBy: user.uid,
-                  inviteCode: null,
-                  updatedAt: serverTimestamp(),
-                },
-                { merge: true }
-              );
-
+              await fnDeleteTeam({ teamId });
               Alert.alert("Deleted", "Team deleted.");
               router.replace("/(app)/(tabs)/teams");
             } catch (e: any) {
@@ -384,6 +363,7 @@ export default function TeamSettingsScreen() {
   }
 
   const disabled = !canEdit || saving || !!team.deleted;
+  const inviteCode = String(team.inviteCode ?? "").trim();
 
   return (
     <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
@@ -446,6 +426,32 @@ export default function TeamSettingsScreen() {
               </Text>
             </View>
           )}
+
+          {/* Invite */}
+          <View style={styles.card}>
+            <Text style={styles.label}>Invite code</Text>
+            <View style={[styles.inputRow, { flexDirection: "row", alignItems: "center" }]}>
+              <Text style={[styles.inviteText, { flex: 1 }]} numberOfLines={1}>
+                {inviteCode || "(none)"}
+              </Text>
+
+              <Pressable
+                onPress={handleShareInvite}
+                disabled={!inviteCode || saving}
+                style={({ pressed }) => [
+                  styles.smallAction,
+                  (!inviteCode || saving) && { opacity: 0.6 },
+                  pressed && inviteCode && !saving && styles.pressed,
+                ]}
+              >
+                <Text style={styles.smallActionText}>Share</Text>
+              </Pressable>
+            </View>
+
+            <Text style={styles.helpText}>
+              Share this code so others can request to join your team.
+            </Text>
+          </View>
 
           {/* Settings card */}
           <View style={styles.card}>
@@ -614,6 +620,20 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   input: { color: "white", fontSize: 16, fontWeight: "800" },
+
+  inviteText: { color: "white", fontSize: 16, fontWeight: "900" },
+  smallAction: {
+    height: 34,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255,255,255,0.10)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.14)",
+    marginLeft: 10,
+  },
+  smallActionText: { color: "white", fontWeight: "900", fontSize: 12 },
 
   helpText: {
     marginTop: 10,
